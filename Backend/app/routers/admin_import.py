@@ -12,16 +12,18 @@ import uuid
 from pathlib import Path
 from zipfile import BadZipFile
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.utils.exceptions import InvalidFileException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import get_current_user_with_roles, has_any_role
 from app.core.dependencies import get_db
+from app.models.associations import program_department_association
 from app.models.department import Department
 from app.models.import_job import BulkImportJob
 from app.models.program import Program
@@ -165,7 +167,34 @@ def _queue_import_job_from_file_bytes(
     size_bytes: int,
     retried_from_job_id: str | None = None,
 ) -> ImportJobCreateResponse:
-    """Store the upload, create the job row, and send the heavy work to Celery."""
+    """Store an uploaded workbook first, then queue the background import job."""
+    storage_dir = Path(settings.import_storage_dir) / "uploads"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    stored_file_path = storage_dir / f"{uuid.uuid4()}.xlsx"
+    stored_file_path.write_bytes(file_bytes)
+    return _queue_import_job_from_stored_path(
+        db=db,
+        settings=settings,
+        current_user=current_user,
+        filename=filename,
+        stored_file_path=str(stored_file_path),
+        size_bytes=size_bytes,
+        retried_from_job_id=retried_from_job_id,
+    )
+
+
+def _queue_import_job_from_stored_path(
+    *,
+    db: Session,
+    settings,
+    current_user: User,
+    filename: str,
+    stored_file_path: str,
+    size_bytes: int,
+    retried_from_job_id: str | None = None,
+    preview_token: str | None = None,
+) -> ImportJobCreateResponse:
+    """Create the job row around a server-side stored import payload and queue the worker."""
     repo = ImportRepository(db)
     recent_job_count = repo.count_recent_jobs(
         created_by_user_id=current_user.id,
@@ -190,11 +219,6 @@ def _queue_import_job_from_file_bytes(
 
     job_id = str(uuid.uuid4())
     target_school_id = _ensure_user_school(current_user)
-    storage_dir = Path(settings.import_storage_dir) / "uploads"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    # Save the uploaded file first so the worker can read it later.
-    stored_file_path = storage_dir / f"{job_id}.xlsx"
-    stored_file_path.write_bytes(file_bytes)
 
     job = BulkImportJob(
         id=job_id,
@@ -202,20 +226,23 @@ def _queue_import_job_from_file_bytes(
         target_school_id=target_school_id,
         status="pending",
         original_filename=filename,
-        stored_file_path=str(stored_file_path),
+        stored_file_path=stored_file_path,
     )
 
     repo.create_job(job)
+    audit_details = {
+        "job_id": job_id,
+        "filename": filename,
+        "size_bytes": size_bytes,
+        "retried_from_job_id": retried_from_job_id,
+    }
+    if preview_token:
+        audit_details["preview_token"] = preview_token
     _append_import_audit_log(
         db,
         current_user=current_user,
         status_value="queued",
-        details={
-            "job_id": job_id,
-            "filename": filename,
-            "size_bytes": size_bytes,
-            "retried_from_job_id": retried_from_job_id,
-        },
+        details=audit_details,
         action="student_bulk_import_retry" if retried_from_job_id else "student_bulk_import_attempt",
     )
     db.commit()
@@ -247,11 +274,211 @@ def _build_validation_context(db: Session, target_school_id: int) -> ValidationC
             .all()
         )
     }
+    department_course_pairs = {
+        (int(department_id), int(program_id))
+        for program_id, department_id in db.execute(
+            select(
+                program_department_association.c.program_id,
+                program_department_association.c.department_id,
+            )
+            .select_from(program_department_association)
+            .join(Program, Program.id == program_department_association.c.program_id)
+            .join(Department, Department.id == program_department_association.c.department_id)
+            .where(
+                Program.school_id == target_school_id,
+                Department.school_id == target_school_id,
+            )
+        ).all()
+    }
     return ValidationContext(
         target_school_id=target_school_id,
         department_lookup=department_lookup,
         course_lookup=course_lookup,
+        department_course_pairs=department_course_pairs,
     )
+
+
+def _preview_manifest_dir(settings) -> Path:
+    return Path(settings.import_storage_dir) / "previews"
+
+
+def _preview_manifest_path(settings, preview_token: str) -> Path:
+    return _preview_manifest_dir(settings) / f"{preview_token}.json"
+
+
+def _write_preview_manifest(
+    *,
+    settings,
+    preview_token: str,
+    manifest: dict,
+) -> None:
+    preview_dir = _preview_manifest_dir(settings)
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    _preview_manifest_path(settings, preview_token).write_text(
+        json.dumps(manifest, default=str),
+        encoding="utf-8",
+    )
+
+
+def _store_preview_manifest(
+    *,
+    settings,
+    current_user: User,
+    target_school_id: int,
+    filename: str,
+    total_rows: int,
+    valid_rows: int,
+    invalid_rows: int,
+    can_commit: bool,
+    rows: list[dict],
+    error_rows: list[dict],
+) -> str:
+    preview_token = str(uuid.uuid4())
+    manifest = {
+        "preview_token": preview_token,
+        "created_by_user_id": current_user.id,
+        "target_school_id": target_school_id,
+        "original_filename": filename,
+        "total_rows": total_rows,
+        "valid_rows": valid_rows,
+        "invalid_rows": invalid_rows,
+        "can_commit": can_commit,
+        "rows": rows,
+        "error_rows": error_rows,
+    }
+    _write_preview_manifest(
+        settings=settings,
+        preview_token=preview_token,
+        manifest=manifest,
+    )
+    return preview_token
+
+
+def _load_preview_manifest(
+    *,
+    settings,
+    preview_token: str,
+    current_user: User,
+) -> tuple[dict, Path]:
+    manifest_path = _preview_manifest_path(settings, preview_token)
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Approved preview not found. Preview the file again before importing.",
+        )
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Approved preview data is invalid. Preview the file again before importing.",
+        ) from exc
+
+    if manifest.get("created_by_user_id") != current_user.id:
+        raise HTTPException(status_code=404, detail="Approved preview not found")
+
+    target_school_id = _ensure_user_school(current_user)
+    if manifest.get("target_school_id") != target_school_id:
+        raise HTTPException(status_code=404, detail="Approved preview not found")
+
+    if not isinstance(manifest.get("rows"), list):
+        raise HTTPException(
+            status_code=400,
+            detail="Approved preview data is incomplete. Preview the file again before importing.",
+        )
+
+    return manifest, manifest_path
+
+
+def _build_preview_rows_from_manifest_rows(manifest_rows: list[dict]) -> list[ImportPreviewRow]:
+    preview_rows: list[ImportPreviewRow] = []
+    sorted_rows = sorted(
+        (row for row in manifest_rows if isinstance(row, dict)),
+        key=lambda item: int(item.get("row_number") or 0),
+    )
+    for row in sorted_rows[:200]:
+        row_number = int(row.get("row_number") or 0)
+        raw_row_data = row.get("raw_row_data") if isinstance(row.get("raw_row_data"), dict) else None
+        preview_rows.append(
+            ImportPreviewRow(
+                row=row_number,
+                status="valid",
+                errors=[],
+                suggestions=[],
+                row_data=raw_row_data,
+            )
+        )
+    return preview_rows
+
+
+def _build_preview_response_from_manifest(manifest: dict) -> ImportPreviewResponse:
+    manifest_rows = manifest.get("rows") if isinstance(manifest.get("rows"), list) else []
+    preview_token = manifest.get("preview_token")
+    return ImportPreviewResponse(
+        filename=str(manifest.get("original_filename") or "student_import.xlsx"),
+        total_rows=int(manifest.get("total_rows") or len(manifest_rows)),
+        valid_rows=int(manifest.get("valid_rows") or 0),
+        invalid_rows=int(manifest.get("invalid_rows") or 0),
+        can_commit=bool(manifest.get("can_commit")),
+        preview_token=str(preview_token) if preview_token else None,
+        rows=_build_preview_rows_from_manifest_rows(manifest_rows),
+    )
+
+
+def _find_persistent_row_conflicts(db: Session, rows: list[dict]) -> dict[int, list[str]]:
+    if not rows:
+        return {}
+
+    repo = ImportRepository(db)
+    existing_emails = repo.existing_emails(row["email"] for row in rows)
+    existing_pairs = repo.existing_school_student_pairs(
+        (row["school_id"], row["student_id"]) for row in rows
+    )
+
+    conflicts: dict[int, list[str]] = {}
+    for row in rows:
+        row_errors: list[str] = []
+        if row["email"] in existing_emails:
+            row_errors.append("Email already exists")
+        if (row["school_id"], row["student_id"]) in existing_pairs:
+            row_errors.append("Duplicate Student_ID within School_ID")
+        if row_errors:
+            conflicts[int(row["row_number"])] = row_errors
+
+    return conflicts
+
+
+def _build_retry_workbook_bytes(*, sheet_title: str, row_payloads: list[dict]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = sheet_title
+    sheet.append(EXPECTED_HEADERS)
+    for row_data in row_payloads:
+        sheet.append([str(row_data.get(header, "")) for header in EXPECTED_HEADERS])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    workbook.close()
+    output.seek(0)
+    return output.read()
+
+
+def _build_preview_error_report_bytes(error_payloads: list[dict]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Preview Errors"
+    sheet.append(EXPECTED_HEADERS + ["Error"])
+    for item in error_payloads:
+        row_data = item.get("row_data") if isinstance(item.get("row_data"), dict) else {}
+        error_message = "; ".join(item.get("errors") or []) or "Unknown preview error"
+        sheet.append([str(row_data.get(header, "")) for header in EXPECTED_HEADERS] + [error_message])
+
+    output = io.BytesIO()
+    workbook.save(output)
+    workbook.close()
+    output.seek(0)
+    return output.read()
 
 
 @router.get("/import-students/template")
@@ -362,7 +589,10 @@ def preview_import_students(
 
         valid_rows = 0
         invalid_rows = 0
+        approved_rows: list[dict] = []
+        error_rows: list[dict] = []
         preview_rows: list[ImportPreviewRow] = []
+        preview_rows_by_number: dict[int, ImportPreviewRow] = {}
 
         for row_number, row_values in enumerate(row_iter, start=2):
             transformed, row_errors, row_data = validate_and_transform_row(
@@ -375,30 +605,79 @@ def preview_import_students(
                 status_value = "failed"
                 errors = row_errors
                 suggestions = suggest_fixes(row_errors)
+                error_rows.append(
+                    {
+                        "row": row_number,
+                        "row_data": row_data,
+                        "errors": row_errors,
+                    }
+                )
             else:
                 valid_rows += 1
                 status_value = "valid"
                 errors = []
                 suggestions = []
+                transformed["raw_row_data"] = row_data
+                approved_rows.append(transformed)
 
             # Keep the preview response small even if the upload is very large.
             if len(preview_rows) < 200:
-                preview_rows.append(
-                    ImportPreviewRow(
-                        row=row_number,
-                        status=status_value,
-                        errors=errors,
-                        suggestions=suggestions,
-                        row_data=row_data if transformed is None else row_data,
-                    )
+                preview_row = ImportPreviewRow(
+                    row=row_number,
+                    status=status_value,
+                    errors=errors,
+                    suggestions=suggestions,
+                    row_data=row_data if transformed is None else row_data,
                 )
+                preview_rows.append(preview_row)
+                preview_rows_by_number[row_number] = preview_row
+
+        persistent_conflicts = _find_persistent_row_conflicts(db, approved_rows)
+        if persistent_conflicts:
+            valid_rows -= len(persistent_conflicts)
+            invalid_rows += len(persistent_conflicts)
+
+            filtered_rows: list[dict] = []
+            for row in approved_rows:
+                row_errors = persistent_conflicts.get(int(row["row_number"]))
+                if row_errors:
+                    preview_row = preview_rows_by_number.get(int(row["row_number"]))
+                    if preview_row is not None:
+                        preview_row.status = "failed"
+                        preview_row.errors = row_errors
+                        preview_row.suggestions = suggest_fixes(row_errors)
+                    error_rows.append(
+                        {
+                            "row": int(row["row_number"]),
+                            "row_data": row.get("raw_row_data"),
+                            "errors": row_errors,
+                        }
+                    )
+                    continue
+                filtered_rows.append(row)
+            approved_rows = filtered_rows
+
+        can_commit = total_rows > 0 and invalid_rows == 0
+        preview_token = _store_preview_manifest(
+            settings=settings,
+            current_user=current_user,
+            target_school_id=target_school_id,
+            filename=filename,
+            total_rows=total_rows,
+            valid_rows=valid_rows,
+            invalid_rows=invalid_rows,
+            can_commit=can_commit,
+            rows=approved_rows,
+            error_rows=error_rows,
+        )
 
         return ImportPreviewResponse(
             filename=filename,
             total_rows=total_rows,
             valid_rows=valid_rows,
             invalid_rows=invalid_rows,
-            can_commit=(total_rows > 0 and invalid_rows == 0),
+            can_commit=can_commit,
+            preview_token=preview_token,
             rows=preview_rows,
         )
     finally:
@@ -407,28 +686,163 @@ def preview_import_students(
 
 @router.post("/import-students", response_model=ImportJobCreateResponse)
 def import_students(
-    file: UploadFile = File(...),
+    preview_token: str | None = Form(default=None),
     current_user: User = Depends(get_current_admin_or_school_it),
     db: Session = Depends(get_db),
 ):
-    """Save the uploaded file and create a background import job."""
+    """Queue a preview-approved import job from a stored preview manifest."""
     settings = get_settings()
-    filename, size_bytes = _validate_upload_basics(
-        file=file,
-        current_user=current_user,
-        db=db,
+    if preview_token:
+        manifest, manifest_path = _load_preview_manifest(
+            settings=settings,
+            preview_token=preview_token,
+            current_user=current_user,
+        )
+        if not bool(manifest.get("can_commit")):
+            raise HTTPException(
+                status_code=400,
+                detail="Preview still has invalid rows. Fix them before importing.",
+            )
+        filename = str(manifest.get("original_filename") or "student_import.xlsx")
+        size_bytes = manifest_path.stat().st_size if manifest_path.exists() else 0
+        return _queue_import_job_from_stored_path(
+            db=db,
+            settings=settings,
+            current_user=current_user,
+            filename=filename,
+            stored_file_path=str(manifest_path),
+            size_bytes=size_bytes,
+            preview_token=preview_token,
+        )
+
+    raise HTTPException(status_code=400, detail="Preview the file first before importing.")
+
+
+@router.get("/import-preview-errors/{preview_token}/download")
+def download_preview_errors(
+    preview_token: str,
+    current_user: User = Depends(get_current_admin_or_school_it),
+    db: Session = Depends(get_db),
+):
+    """Download an Excel report of rows that failed during preview validation."""
+    settings = get_settings()
+    manifest, _ = _load_preview_manifest(
         settings=settings,
-    )
-    file.file.seek(0)
-    file_bytes = file.file.read()
-    return _queue_import_job_from_file_bytes(
-        db=db,
-        settings=settings,
+        preview_token=preview_token,
         current_user=current_user,
-        filename=filename,
-        file_bytes=file_bytes,
-        size_bytes=size_bytes,
     )
+    error_rows = manifest.get("error_rows")
+    if not isinstance(error_rows, list) or not error_rows:
+        raise HTTPException(status_code=404, detail="No preview errors available to download")
+
+    original_filename = str(manifest.get("original_filename") or "student_import.xlsx")
+    report_bytes = _build_preview_error_report_bytes(error_rows)
+    download_name = f"preview_errors_{Path(original_filename).stem}.xlsx"
+
+    return StreamingResponse(
+        io.BytesIO(report_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
+
+
+@router.get("/import-preview-errors/{preview_token}/retry-download")
+def download_preview_retry_file(
+    preview_token: str,
+    current_user: User = Depends(get_current_admin_or_school_it),
+    db: Session = Depends(get_db),
+):
+    """Download an Excel file containing only preview-failed rows for correction and re-upload."""
+    settings = get_settings()
+    manifest, _ = _load_preview_manifest(
+        settings=settings,
+        preview_token=preview_token,
+        current_user=current_user,
+    )
+    error_rows = manifest.get("error_rows")
+    if not isinstance(error_rows, list) or not error_rows:
+        raise HTTPException(status_code=404, detail="No preview errors available to retry")
+
+    retry_row_payloads = [
+        item["row_data"]
+        for item in error_rows
+        if isinstance(item, dict) and isinstance(item.get("row_data"), dict)
+    ]
+    if not retry_row_payloads:
+        raise HTTPException(
+            status_code=404,
+            detail="No retryable row payloads found for this preview",
+        )
+
+    original_filename = str(manifest.get("original_filename") or "student_import.xlsx")
+    retry_bytes = _build_retry_workbook_bytes(
+        sheet_title="Students-Retry",
+        row_payloads=retry_row_payloads,
+    )
+    download_name = f"preview_retry_{Path(original_filename).name}"
+
+    return StreamingResponse(
+        io.BytesIO(retry_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
+
+
+@router.post(
+    "/import-preview-errors/{preview_token}/remove-invalid",
+    response_model=ImportPreviewResponse,
+)
+def remove_invalid_preview_rows(
+    preview_token: str,
+    current_user: User = Depends(get_current_admin_or_school_it),
+    db: Session = Depends(get_db),
+):
+    """Keep only preview-approved rows so the preview can proceed to import."""
+    settings = get_settings()
+    manifest, _ = _load_preview_manifest(
+        settings=settings,
+        preview_token=preview_token,
+        current_user=current_user,
+    )
+    approved_rows = manifest.get("rows")
+    if not isinstance(approved_rows, list):
+        raise HTTPException(
+            status_code=400,
+            detail="Preview data is incomplete. Preview the file again before importing.",
+        )
+    if not approved_rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid preview rows available to keep.",
+        )
+
+    cleaned_manifest = dict(manifest)
+    cleaned_manifest["total_rows"] = len(approved_rows)
+    cleaned_manifest["valid_rows"] = len(approved_rows)
+    cleaned_manifest["invalid_rows"] = 0
+    cleaned_manifest["can_commit"] = True
+    cleaned_manifest["error_rows"] = []
+    _write_preview_manifest(
+        settings=settings,
+        preview_token=preview_token,
+        manifest=cleaned_manifest,
+    )
+
+    _append_import_audit_log(
+        db,
+        current_user=current_user,
+        status_value="preview_cleaned",
+        details={
+            "preview_token": preview_token,
+            "kept_rows": len(approved_rows),
+            "dropped_rows": int(manifest.get("invalid_rows") or 0),
+            "filename": str(manifest.get("original_filename") or "student_import.xlsx"),
+        },
+        action="student_bulk_import_preview_cleaned",
+    )
+    db.commit()
+
+    return _build_preview_response_from_manifest(cleaned_manifest)
 
 
 @router.post("/import-students/retry-failed/{job_id}", response_model=ImportJobCreateResponse)

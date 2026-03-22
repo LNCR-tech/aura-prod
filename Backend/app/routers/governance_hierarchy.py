@@ -20,6 +20,7 @@ from app.schemas.governance_hierarchy import (
     GovernanceAccessResponse,
     GovernanceAccessibleStudentResponse,
     GovernanceAnnouncementCreate,
+    GovernanceDashboardOverviewResponse,
     GovernanceAnnouncementMonitorResponse,
     GovernanceAnnouncementResponse,
     GovernanceAnnouncementUpdate,
@@ -95,6 +96,8 @@ def search_governance_student_candidates(
 @router.get("/students", response_model=list[GovernanceAccessibleStudentResponse])
 def list_accessible_governance_students(
     governance_context: GovernanceUnitType | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int | None = Query(default=None, ge=1, le=250),
     current_user: User = Depends(get_current_governance_route_user),
     db: Session = Depends(get_db),
 ):
@@ -102,6 +105,8 @@ def list_accessible_governance_students(
         db,
         current_user=current_user,
         unit_type=governance_context,
+        skip=skip,
+        limit=limit,
     )
     return [
         GovernanceAccessibleStudentResponse(
@@ -223,6 +228,22 @@ def get_governance_unit_details(
     db: Session = Depends(get_db),
 ):
     return governance_hierarchy_service.get_governance_unit_details(
+        db,
+        current_user=current_user,
+        governance_unit_id=governance_unit_id,
+    )
+
+
+@router.get(
+    "/units/{governance_unit_id}/dashboard-overview",
+    response_model=GovernanceDashboardOverviewResponse,
+)
+def get_governance_dashboard_overview(
+    governance_unit_id: int,
+    current_user: User = Depends(get_current_governance_route_user),
+    db: Session = Depends(get_db),
+):
+    return governance_hierarchy_service.get_governance_dashboard_overview(
         db,
         current_user=current_user,
         governance_unit_id=governance_unit_id,

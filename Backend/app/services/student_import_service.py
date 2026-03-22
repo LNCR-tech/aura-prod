@@ -15,10 +15,12 @@ from zipfile import BadZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import SessionLocal
+from app.models.associations import program_department_association
 from app.models.school import SchoolAuditLog
 from app.models.user import User
 from app.repositories.import_repository import ImportRepository
@@ -127,6 +129,14 @@ class StudentImportService:
 
         if not os.path.exists(file_path):
             raise FileNotFoundError("Uploaded file was not found on server")
+
+        if file_path.lower().endswith(".json"):
+            return self._process_preview_manifest(
+                job_id=job_id,
+                file_path=file_path,
+                target_school_id=target_school_id,
+                start_time=start_time,
+            )
 
         validation_context = self._build_validation_context(target_school_id)
 
@@ -267,6 +277,133 @@ class StudentImportService:
             if workbook is not None:
                 workbook.close()
 
+    def _process_preview_manifest(
+        self,
+        *,
+        job_id: str,
+        file_path: str,
+        target_school_id: int,
+        start_time: datetime,
+    ) -> str | None:
+        settings = self.settings
+        failed_report_dir = Path(settings.import_storage_dir) / "reports"
+        failed_report_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            manifest = json.loads(Path(file_path).read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Approved preview data is invalid") from exc
+
+        manifest_target_school_id = manifest.get("target_school_id")
+        if manifest_target_school_id != target_school_id:
+            raise RuntimeError("Approved preview data does not match the import school")
+
+        manifest_rows = manifest.get("rows")
+        if not isinstance(manifest_rows, list):
+            raise RuntimeError("Approved preview data is missing rows")
+
+        failed_workbook = Workbook(write_only=True)
+        failed_sheet = failed_workbook.create_sheet("Failed Rows")
+        failed_sheet.append(EXPECTED_HEADERS + ["Error"])
+
+        row_buffer: List[dict] = []
+        error_buffer: List[dict] = []
+
+        processed_rows = 0
+        success_count = 0
+        failed_count = 0
+        total_rows = int(manifest.get("total_rows") or len(manifest_rows))
+
+        with SessionLocal() as db:
+            repo = ImportRepository(db)
+            student_role_id = repo.get_student_role_id()
+            db.commit()
+
+        for approved_row in manifest_rows:
+            processed_row = dict(approved_row)
+            raw_row_data = processed_row.get("raw_row_data") or {}
+
+            temporary_password = generate_secure_password()
+            processed_row["temporary_password"] = temporary_password
+            processed_row["password_hash"] = hash_password_bcrypt(temporary_password)
+            processed_row["raw_row_data"] = raw_row_data
+            row_buffer.append(processed_row)
+            processed_rows += 1
+
+            if len(row_buffer) >= settings.import_chunk_size:
+                batch_success_count, batch_failed_count, batch_errors = self._flush_batch(
+                    job_id=job_id,
+                    row_buffer=row_buffer,
+                    student_role_id=student_role_id,
+                    trust_preview=True,
+                )
+                success_count += batch_success_count
+                failed_count += batch_failed_count
+                for error_item in batch_errors:
+                    self._append_failed_row(
+                        failed_sheet,
+                        error_item.get("row_data", {}),
+                        error_item.get("error", "unknown error"),
+                    )
+                error_buffer.extend(batch_errors)
+                row_buffer = []
+
+            if len(error_buffer) >= 1000:
+                with SessionLocal() as db:
+                    repo = ImportRepository(db)
+                    repo.add_errors(job_id, error_buffer)
+                    db.commit()
+                error_buffer = []
+
+            if processed_rows % 500 == 0:
+                self._update_progress(
+                    job_id=job_id,
+                    total_rows=total_rows,
+                    processed_rows=processed_rows,
+                    success_count=success_count,
+                    failed_count=failed_count,
+                    start_time=start_time,
+                )
+
+        if row_buffer:
+            batch_success_count, batch_failed_count, batch_errors = self._flush_batch(
+                job_id=job_id,
+                row_buffer=row_buffer,
+                student_role_id=student_role_id,
+                trust_preview=True,
+            )
+            success_count += batch_success_count
+            failed_count += batch_failed_count
+            for error_item in batch_errors:
+                self._append_failed_row(
+                    failed_sheet,
+                    error_item.get("row_data", {}),
+                    error_item.get("error", "unknown error"),
+                )
+            error_buffer.extend(batch_errors)
+
+        if error_buffer:
+            with SessionLocal() as db:
+                repo = ImportRepository(db)
+                repo.add_errors(job_id, error_buffer)
+                db.commit()
+
+        self._update_progress(
+            job_id=job_id,
+            total_rows=total_rows,
+            processed_rows=processed_rows,
+            success_count=success_count,
+            failed_count=failed_count,
+            start_time=start_time,
+        )
+
+        if failed_count > 0:
+            report_path = failed_report_dir / f"{job_id}_failed_rows.xlsx"
+            failed_workbook.save(str(report_path))
+            return str(report_path)
+
+        return None
+
     def _safe_error_message(self, exc: Exception) -> str:
         if isinstance(exc, (HeaderValidationError, FileNotFoundError, InvalidFileException, BadZipFile)):
             return str(exc)
@@ -304,10 +441,15 @@ class StudentImportService:
         job_id: str,
         row_buffer: List[dict],
         student_role_id: int,
+        trust_preview: bool = False,
     ) -> tuple[int, int, List[dict]]:
         with SessionLocal() as db:
             repo = ImportRepository(db)
-            success_rows, batch_errors = repo.bulk_insert_students(row_buffer, student_role_id)
+            success_rows, batch_errors = repo.bulk_insert_students(
+                row_buffer,
+                student_role_id,
+                trust_preview=trust_preview,
+            )
             db.commit()
 
         for row in success_rows:
@@ -349,11 +491,28 @@ class StudentImportService:
                     .all()
                 )
             }
+            department_course_pairs = {
+                (int(department_id), int(program_id))
+                for program_id, department_id in db.execute(
+                    select(
+                        program_department_association.c.program_id,
+                        program_department_association.c.department_id,
+                    )
+                    .select_from(program_department_association)
+                    .join(Program, Program.id == program_department_association.c.program_id)
+                    .join(Department, Department.id == program_department_association.c.department_id)
+                    .where(
+                        Program.school_id == target_school_id,
+                        Department.school_id == target_school_id,
+                    )
+                ).all()
+            }
 
         return ValidationContext(
             target_school_id=target_school_id,
             department_lookup=department_lookup,
             course_lookup=course_lookup,
+            department_course_pairs=department_course_pairs,
         )
 
     def _append_failed_row(self, failed_sheet, row_data: dict, error_message: str) -> None:

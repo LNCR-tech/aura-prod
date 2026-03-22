@@ -1970,6 +1970,339 @@ def test_accessible_students_endpoint_returns_governance_scoped_students(client,
     assert payload[0]["student_profile"]["program_name"] == "BS Engineering API"
 
 
+def test_accessible_students_endpoint_supports_skip_and_limit(client, test_db):
+    school = _create_school(test_db, code="STUDENT-SCOPE-PAGE")
+    school_it_role = _create_role(test_db, name="school_IT")
+    student_role = _create_role(test_db, name="student")
+
+    viewer = _create_user(
+        test_db,
+        email="scope.viewer.page@example.com",
+        school_id=school.id,
+        role_ids=[student_role.id],
+    )
+    school_it_user = _create_user(
+        test_db,
+        email="scope.schoolit.page@example.com",
+        school_id=school.id,
+        role_ids=[school_it_role.id],
+    )
+
+    engineering = Department(name="Engineering Students Page", school_id=school.id)
+    arts = Department(name="Arts Students Page", school_id=school.id)
+    engineering_program = Program(name="BS Engineering Page", school_id=school.id)
+    arts_program = Program(name="BA Arts Page", school_id=school.id)
+    engineering_program.departments.append(engineering)
+    arts_program.departments.append(arts)
+    test_db.add_all([engineering, arts, engineering_program, arts_program])
+    test_db.commit()
+
+    for email, student_id, year_level in [
+        ("eng.page.001@example.com", "ENG-PAGE-001", 1),
+        ("eng.page.002@example.com", "ENG-PAGE-002", 2),
+        ("eng.page.003@example.com", "ENG-PAGE-003", 3),
+    ]:
+        student_user = _create_user(
+            test_db,
+            email=email,
+            school_id=school.id,
+            role_ids=[student_role.id],
+        )
+        test_db.add(
+            StudentProfile(
+                user_id=student_user.id,
+                school_id=school.id,
+                student_id=student_id,
+                department_id=engineering.id,
+                program_id=engineering_program.id,
+                year_level=year_level,
+            )
+        )
+
+    arts_student_user = _create_user(
+        test_db,
+        email="arts.page.001@example.com",
+        school_id=school.id,
+        role_ids=[student_role.id],
+    )
+    test_db.add(
+        StudentProfile(
+            user_id=arts_student_user.id,
+            school_id=school.id,
+            student_id="ART-PAGE-001",
+            department_id=arts.id,
+            program_id=arts_program.id,
+            year_level=1,
+        )
+    )
+    test_db.commit()
+
+    _seed_permission_catalog(test_db)
+    view_students_permission = (
+        test_db.query(GovernancePermission)
+        .filter(GovernancePermission.permission_code == PermissionCode.VIEW_STUDENTS)
+        .first()
+    )
+    sg_unit = GovernanceUnit(
+        unit_code="SG-STUDENT-PAGE",
+        unit_name="SG Student Scope Page",
+        unit_type=GovernanceUnitType.SG,
+        school_id=school.id,
+        department_id=engineering.id,
+        created_by_user_id=school_it_user.id,
+    )
+    test_db.add(sg_unit)
+    test_db.commit()
+
+    viewer_membership = _create_governance_member(
+        test_db,
+        governance_unit_id=sg_unit.id,
+        user_id=viewer.id,
+        assigned_by_user_id=school_it_user.id,
+    )
+    _grant_member_permission(
+        test_db,
+        governance_member_id=viewer_membership.id,
+        permission_id=view_students_permission.id,
+        granted_by_user_id=school_it_user.id,
+    )
+
+    first_page_response = client.get(
+        "/api/governance/students?limit=2",
+        headers=_auth_headers(viewer),
+    )
+    assert first_page_response.status_code == 200
+    first_page_payload = first_page_response.json()
+    assert [item["student_profile"]["student_id"] for item in first_page_payload] == [
+        "ENG-PAGE-001",
+        "ENG-PAGE-002",
+    ]
+
+    second_page_response = client.get(
+        "/api/governance/students?skip=2&limit=2",
+        headers=_auth_headers(viewer),
+    )
+    assert second_page_response.status_code == 200
+    second_page_payload = second_page_response.json()
+    assert [item["student_profile"]["student_id"] for item in second_page_payload] == [
+        "ENG-PAGE-003",
+    ]
+
+
+def test_dashboard_overview_endpoint_returns_lightweight_summary(client, test_db):
+    school = _create_school(test_db, code="DASHBOARD-OVERVIEW")
+    school_it_role = _create_role(test_db, name="school_IT")
+    student_role = _create_role(test_db, name="student")
+
+    viewer = _create_user(
+        test_db,
+        email="dashboard.viewer@example.com",
+        school_id=school.id,
+        role_ids=[student_role.id],
+    )
+    school_it_user = _create_user(
+        test_db,
+        email="dashboard.schoolit@example.com",
+        school_id=school.id,
+        role_ids=[school_it_role.id],
+    )
+
+    engineering = Department(name="Dashboard Engineering", school_id=school.id)
+    arts = Department(name="Dashboard Arts", school_id=school.id)
+    engineering_program_a = Program(name="Dashboard BSIT", school_id=school.id)
+    engineering_program_b = Program(name="Dashboard BSCS", school_id=school.id)
+    arts_program = Program(name="Dashboard BA", school_id=school.id)
+    engineering_program_a.departments.append(engineering)
+    engineering_program_b.departments.append(engineering)
+    arts_program.departments.append(arts)
+    test_db.add_all(
+        [
+            engineering,
+            arts,
+            engineering_program_a,
+            engineering_program_b,
+            arts_program,
+        ]
+    )
+    test_db.commit()
+
+    for email, student_id, program_id in [
+        ("dashboard.student.1@example.com", "DASH-ENG-001", engineering_program_a.id),
+        ("dashboard.student.2@example.com", "DASH-ENG-002", engineering_program_b.id),
+        ("dashboard.student.3@example.com", "DASH-ENG-003", engineering_program_a.id),
+    ]:
+        student_user = _create_user(
+            test_db,
+            email=email,
+            school_id=school.id,
+            role_ids=[student_role.id],
+        )
+        test_db.add(
+            StudentProfile(
+                user_id=student_user.id,
+                school_id=school.id,
+                student_id=student_id,
+                department_id=engineering.id,
+                program_id=program_id,
+                year_level=1,
+            )
+        )
+
+    arts_student_user = _create_user(
+        test_db,
+        email="dashboard.student.arts@example.com",
+        school_id=school.id,
+        role_ids=[student_role.id],
+    )
+    test_db.add(
+        StudentProfile(
+            user_id=arts_student_user.id,
+            school_id=school.id,
+            student_id="DASH-ART-001",
+            department_id=arts.id,
+            program_id=arts_program.id,
+            year_level=1,
+        )
+    )
+    test_db.commit()
+
+    _seed_permission_catalog(test_db)
+    permission_lookup = {
+        permission.permission_code: permission
+        for permission in test_db.query(GovernancePermission).all()
+    }
+
+    sg_unit = GovernanceUnit(
+        unit_code="DASH-SG",
+        unit_name="Dashboard SG",
+        unit_type=GovernanceUnitType.SG,
+        school_id=school.id,
+        department_id=engineering.id,
+        created_by_user_id=school_it_user.id,
+    )
+    test_db.add(sg_unit)
+    test_db.commit()
+
+    viewer_membership = _create_governance_member(
+        test_db,
+        governance_unit_id=sg_unit.id,
+        user_id=viewer.id,
+        assigned_by_user_id=school_it_user.id,
+    )
+    _grant_member_permission(
+        test_db,
+        governance_member_id=viewer_membership.id,
+        permission_id=permission_lookup[PermissionCode.VIEW_STUDENTS].id,
+        granted_by_user_id=school_it_user.id,
+    )
+    _grant_member_permission(
+        test_db,
+        governance_member_id=viewer_membership.id,
+        permission_id=permission_lookup[PermissionCode.MANAGE_ANNOUNCEMENTS].id,
+        granted_by_user_id=school_it_user.id,
+    )
+    _grant_member_permission(
+        test_db,
+        governance_member_id=viewer_membership.id,
+        permission_id=permission_lookup[PermissionCode.MANAGE_MEMBERS].id,
+        granted_by_user_id=school_it_user.id,
+    )
+
+    org_unit_a = GovernanceUnit(
+        unit_code="DASH-ORG-A",
+        unit_name="Dashboard ORG A",
+        unit_type=GovernanceUnitType.ORG,
+        school_id=school.id,
+        parent_unit_id=sg_unit.id,
+        department_id=engineering.id,
+        program_id=engineering_program_a.id,
+        created_by_user_id=viewer.id,
+        is_active=True,
+    )
+    org_unit_b = GovernanceUnit(
+        unit_code="DASH-ORG-B",
+        unit_name="Dashboard ORG B",
+        unit_type=GovernanceUnitType.ORG,
+        school_id=school.id,
+        parent_unit_id=sg_unit.id,
+        department_id=engineering.id,
+        program_id=engineering_program_b.id,
+        created_by_user_id=viewer.id,
+        is_active=True,
+    )
+    test_db.add_all([org_unit_a, org_unit_b])
+    test_db.commit()
+
+    for governance_unit, email in [
+        (org_unit_a, "dashboard.org.a@example.com"),
+        (org_unit_b, "dashboard.org.b@example.com"),
+    ]:
+        member_user = _create_user(
+            test_db,
+            email=email,
+            school_id=school.id,
+            role_ids=[student_role.id],
+        )
+        _create_governance_member(
+            test_db,
+            governance_unit_id=governance_unit.id,
+            user_id=member_user.id,
+            assigned_by_user_id=viewer.id,
+        )
+
+    announcement_base = datetime(2026, 3, 22, 8, 0, 0)
+    test_db.add_all(
+        [
+            GovernanceAnnouncement(
+                governance_unit_id=sg_unit.id,
+                school_id=school.id,
+                title=f"Dashboard Announcement {index}",
+                body="Body",
+                status=status_value,
+                created_by_user_id=viewer.id,
+                updated_by_user_id=viewer.id,
+                created_at=announcement_base + timedelta(minutes=index),
+                updated_at=announcement_base + timedelta(minutes=index),
+            )
+            for index, status_value in [
+                (1, GovernanceAnnouncementStatus.DRAFT),
+                (2, GovernanceAnnouncementStatus.PUBLISHED),
+                (3, GovernanceAnnouncementStatus.PUBLISHED),
+                (4, GovernanceAnnouncementStatus.ARCHIVED),
+                (5, GovernanceAnnouncementStatus.PUBLISHED),
+                (6, GovernanceAnnouncementStatus.PUBLISHED),
+            ]
+        ]
+    )
+    test_db.commit()
+
+    response = client.get(
+        f"/api/governance/units/{sg_unit.id}/dashboard-overview",
+        headers=_auth_headers(viewer),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["governance_unit_id"] == sg_unit.id
+    assert payload["unit_type"] == "SG"
+    assert payload["total_students"] == 3
+    assert payload["published_announcement_count"] == 4
+    assert [item["title"] for item in payload["recent_announcements"]] == [
+        "Dashboard Announcement 6",
+        "Dashboard Announcement 5",
+        "Dashboard Announcement 4",
+        "Dashboard Announcement 3",
+        "Dashboard Announcement 2",
+    ]
+    assert [
+        (item["unit_code"], item["member_count"])
+        for item in payload["child_units"]
+    ] == [
+        ("DASH-ORG-A", 1),
+        ("DASH-ORG-B", 1),
+    ]
+
+
 def test_governance_access_endpoint_returns_aggregated_permission_codes(client, test_db):
     school = _create_school(test_db, code="ACCESS-ME")
     ssg_role = _create_role(test_db, name="ssg")
@@ -2230,6 +2563,13 @@ def test_governance_units_are_listed_only_within_the_actor_school(client, test_d
     test_db.add_all([unit_a, unit_b])
     test_db.commit()
 
+    _create_governance_member(
+        test_db,
+        governance_unit_id=unit_a.id,
+        user_id=campus_admin_a.id,
+        assigned_by_user_id=campus_admin_a.id,
+    )
+
     response = client.get(
         "/api/governance/units",
         headers=_auth_headers(campus_admin_a),
@@ -2239,6 +2579,7 @@ def test_governance_units_are_listed_only_within_the_actor_school(client, test_d
     payload = response.json()
     assert [item["unit_code"] for item in payload] == ["SSG-A"]
     assert payload[0]["school_id"] == school_a.id
+    assert payload[0]["member_count"] == 1
 
 
 def test_ssg_cannot_create_sg_with_other_school_department(client, test_db):

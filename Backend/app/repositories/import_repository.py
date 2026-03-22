@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Sequence, Tuple
 
-from sqlalchemy import delete, func, select, tuple_, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -21,9 +21,18 @@ from app.services.password_change_policy import (
 )
 
 
+BULK_LOOKUP_CHUNK_SIZE = 500
+
+
 class ImportRepository:
     def __init__(self, db: Session):
         self.db = db
+
+    @staticmethod
+    def _chunked(sequence: Sequence, chunk_size: int = BULK_LOOKUP_CHUNK_SIZE):
+        step = max(1, chunk_size)
+        for index in range(0, len(sequence), step):
+            yield sequence[index : index + step]
 
     def create_job(self, job: BulkImportJob) -> BulkImportJob:
         self.db.add(job)
@@ -140,28 +149,52 @@ class ImportRepository:
         email_list = list({email for email in emails if email})
         if not email_list:
             return set()
-        rows = self.db.execute(select(User.email).where(User.email.in_(email_list))).scalars().all()
-        return {email.lower() for email in rows}
+        existing: set[str] = set()
+        for chunk in self._chunked(email_list):
+            rows = self.db.execute(select(User.email).where(User.email.in_(chunk))).scalars().all()
+            existing.update(email.lower() for email in rows)
+        return existing
 
     def existing_school_student_pairs(self, pairs: Iterable[Tuple[int, str]]) -> set[Tuple[int, str]]:
         pair_list = list({(int(school_id), student_id) for school_id, student_id in pairs if student_id})
         if not pair_list:
             return set()
-        rows = self.db.execute(
-            select(StudentProfile.school_id, StudentProfile.student_id).where(
-                tuple_(StudentProfile.school_id, StudentProfile.student_id).in_(pair_list)
-            )
-        ).all()
-        return {(int(school_id), student_id) for school_id, student_id in rows}
 
-    def bulk_insert_students(self, rows: Sequence[dict], student_role_id: int) -> tuple[List[dict], List[dict]]:
+        grouped_student_ids: dict[int, list[str]] = {}
+        for school_id, student_id in pair_list:
+            grouped_student_ids.setdefault(int(school_id), []).append(student_id)
+
+        existing: set[Tuple[int, str]] = set()
+        for school_id, student_ids in grouped_student_ids.items():
+            deduped_student_ids = list(dict.fromkeys(student_ids))
+            for chunk in self._chunked(deduped_student_ids):
+                rows = self.db.execute(
+                    select(StudentProfile.school_id, StudentProfile.student_id).where(
+                        StudentProfile.school_id == school_id,
+                        StudentProfile.student_id.in_(chunk),
+                    )
+                ).all()
+                existing.update((int(found_school_id), found_student_id) for found_school_id, found_student_id in rows)
+
+        return existing
+
+    def bulk_insert_students(
+        self,
+        rows: Sequence[dict],
+        student_role_id: int,
+        *,
+        trust_preview: bool = False,
+    ) -> tuple[List[dict], List[dict]]:
         if not rows:
             return [], []
 
-        existing_emails = self.existing_emails(row["email"] for row in rows)
-        existing_pairs = self.existing_school_student_pairs(
-            (row["school_id"], row["student_id"]) for row in rows
-        )
+        existing_emails: set[str] = set()
+        existing_pairs: set[Tuple[int, str]] = set()
+        if not trust_preview:
+            existing_emails = self.existing_emails(row["email"] for row in rows)
+            existing_pairs = self.existing_school_student_pairs(
+                (row["school_id"], row["student_id"]) for row in rows
+            )
 
         candidate_rows: List[dict] = []
         errors: List[dict] = []
@@ -225,7 +258,11 @@ class ImportRepository:
             errors.append(
                 {
                     "row": row["row_number"],
-                    "error": "Email already exists",
+                    "error": (
+                        "Email already exists after preview approval"
+                        if trust_preview
+                        else "Email already exists"
+                    ),
                     "row_data": row["raw_row_data"],
                 }
             )
@@ -268,7 +305,11 @@ class ImportRepository:
                 errors.append(
                     {
                         "row": row["row_number"],
-                        "error": "Duplicate Student_ID within School_ID",
+                        "error": (
+                            "Duplicate Student_ID within School_ID after preview approval"
+                            if trust_preview
+                            else "Duplicate Student_ID within School_ID"
+                        ),
                         "row_data": row["raw_row_data"],
                     }
                 )

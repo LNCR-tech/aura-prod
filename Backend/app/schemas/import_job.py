@@ -37,6 +37,7 @@ class ImportPreviewResponse(BaseModel):
     valid_rows: int
     invalid_rows: int
     can_commit: bool
+    preview_token: Optional[str] = None
     rows: List[ImportPreviewRow] = Field(default_factory=list)
 
 

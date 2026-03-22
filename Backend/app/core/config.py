@@ -50,6 +50,10 @@ class Settings:
     geo_max_travel_speed_mps: float
     event_status_sync_enabled: bool
     event_status_sync_interval_seconds: int
+    public_attendance_enabled: bool
+    public_attendance_max_faces_per_frame: int
+    public_attendance_scan_cooldown_seconds: int
+    public_attendance_event_lookahead_hours: int
 
     import_max_file_size_mb: int
     import_chunk_size: int
@@ -102,6 +106,22 @@ def get_settings() -> Settings:
         event_status_sync_interval_seconds=max(
             30,
             int(os.getenv("EVENT_STATUS_SYNC_INTERVAL_SECONDS", "60")),
+        ),
+        public_attendance_enabled=_as_bool(
+            os.getenv("PUBLIC_ATTENDANCE_ENABLED"),
+            True,
+        ),
+        public_attendance_max_faces_per_frame=max(
+            1,
+            int(os.getenv("PUBLIC_ATTENDANCE_MAX_FACES_PER_FRAME", "10")),
+        ),
+        public_attendance_scan_cooldown_seconds=max(
+            1,
+            int(os.getenv("PUBLIC_ATTENDANCE_SCAN_COOLDOWN_SECONDS", "8")),
+        ),
+        public_attendance_event_lookahead_hours=max(
+            1,
+            int(os.getenv("PUBLIC_ATTENDANCE_EVENT_LOOKAHEAD_HOURS", "12")),
         ),
         import_max_file_size_mb=int(os.getenv("IMPORT_MAX_FILE_SIZE_MB", "50")),
         import_chunk_size=max(1, int(os.getenv("IMPORT_CHUNK_SIZE", "5000"))),

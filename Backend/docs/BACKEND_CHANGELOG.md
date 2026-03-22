@@ -14,6 +14,600 @@ At minimum include:
 - route or schema changes
 - migration or configuration impact
 
+## 2026-03-22 - Consolidate Docker deployment into one compose file
+
+### Purpose
+
+Simplified deployment by removing the separate production Compose file and moving the practical cloud-safe runtime behavior into the main `docker-compose.yml`.
+
+### Main files
+
+- `docker-compose.yml`
+- `docker-compose.prod.yml`
+- `README.md`
+- `.env.example`
+- `.gitignore`
+- `Backend/docs/BACKEND_PRODUCTION_DEPLOYMENT_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Deployment changes
+
+- removed `docker-compose.prod.yml`
+- changed `docker-compose.yml` to use the production backend and frontend Dockerfiles
+- changed Compose build paths to `./Backend` and `./Frontend` so Linux deployments do not fail on case-sensitive filesystems
+- added a one-shot `migrate` service that runs `alembic upgrade head` before backend, worker, and beat start
+- changed backend health checks to probe `GET /health` instead of only checking the root route
+- changed Postgres, Redis, Mailpit, pgAdmin, and direct backend port mappings to loopback by default
+- moved `pgadmin` to an optional `tools` profile so the app stack is smaller by default
+- kept Mailpit in the main stack so local email flows still work without extra setup
+
+### Configuration impact
+
+- `DATABASE_URL` in `.env` remains the host-side value for scripts and local non-Docker runs
+- Docker Compose now injects the container-internal database URL directly, so host-style `localhost` values in `.env` no longer break the containers
+- `POSTGRES_PORT`, `REDIS_PORT`, `BACKEND_PORT`, `FRONTEND_PORT`, `MAILPIT_SMTP_PORT`, `MAILPIT_UI_PORT`, and `PGADMIN_PORT` can now be set from `.env`
+- `PGADMIN_DEFAULT_EMAIL` and `PGADMIN_DEFAULT_PASSWORD` can be set when the `tools` profile is enabled
+
+### Migration impact
+
+- no new database migration file
+- deployment now automatically runs Alembic on container startup through the `migrate` service
+
+### How to test
+
+1. Run `docker compose config -q`.
+2. Run `docker compose up -d --build`.
+3. Confirm the frontend opens at `http://localhost:5173`.
+4. Confirm the backend health check succeeds at `http://127.0.0.1:8000/health`.
+5. Run `docker compose --profile tools up -d pgadmin` and confirm pgAdmin is reachable at `http://127.0.0.1:5050`.
+
+## 2026-03-22 - Optimize Manage SG and Manage ORG list loading
+
+### Purpose
+
+Reduced `Manage SG` and `Manage ORG` load time by making `GET /api/governance/units` return lightweight unit summaries with `member_count`, so the frontend no longer needs to hydrate every listed SG or ORG with a full detail request on first page load.
+
+### Main files
+
+- `Backend/app/services/governance_hierarchy_service.py`
+- `Backend/app/schemas/governance_hierarchy.py`
+- `Backend/app/tests/test_governance_hierarchy_api.py`
+- `Frontend/src/api/governanceHierarchyApi.ts`
+- `Frontend/src/pages/ManageSg.tsx`
+- `Frontend/src/pages/ManageOrg.tsx`
+- `Backend/docs/BACKEND_GOVERNANCE_HIERARCHY_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- changed `GET /api/governance/units` to use a summary query instead of loading full unit members and permissions for every listed governance unit
+- added `member_count` to `GovernanceUnitSummaryResponse`
+- kept `GET /api/governance/units/{governance_unit_id}` as the full-detail route for member and permission management
+
+### Frontend behavior impact
+
+- `Manage SG` now loads SG cards from the lightweight summary list and only fetches full SG details when the user opens member or permission management
+- `Manage ORG` now follows the same pattern for ORG cards
+- department and program lookups are reused during the page session instead of being re-fetched on every unit refresh
+
+### Testing
+
+1. Open `SSG -> Manage SG` and confirm the first load shows SG cards without waiting for one detail request per SG unit.
+2. Open `SG -> Manage ORG` and confirm the first load shows ORG cards without waiting for one detail request per ORG unit.
+3. Open the `Members` and `Permissions` tabs for one unit and confirm the detail data still loads correctly.
+4. Run `Backend\\.venv\\Scripts\\python.exe -m pytest -q Backend/app/tests/test_governance_hierarchy_api.py -k "governance_units_are_listed_only_within_the_actor_school or dashboard_overview_endpoint_returns_lightweight_summary or accessible_students_endpoint_supports_skip_and_limit"`.
+
+## 2026-03-22 - Optimize SSG, SG, and ORG dashboard loading
+
+### Purpose
+
+Reduced governance dashboard load time by replacing the heaviest dashboard calls with one lightweight backend overview route and by deduplicating the duplicate governance-unit detail request that the sidebar and dashboard page were making at the same time.
+
+### Main files
+
+- `Backend/app/routers/governance_hierarchy.py`
+- `Backend/app/services/governance_hierarchy_service.py`
+- `Backend/app/schemas/governance_hierarchy.py`
+- `Backend/app/tests/test_governance_hierarchy_api.py`
+- `Frontend/src/api/governanceHierarchyApi.ts`
+- `Frontend/src/hooks/useGovernanceWorkspace.ts`
+- `Frontend/src/dashboard/SSGDashboard.tsx`
+- `Frontend/src/pages/GovernanceDashboardPage.tsx`
+- `Backend/docs/BACKEND_GOVERNANCE_HIERARCHY_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- added `GET /api/governance/units/{governance_unit_id}/dashboard-overview`
+- changed dashboard data loading so child unit cards use aggregated member counts instead of fetching full details for every SG or ORG child unit
+- changed dashboard student totals to use a count query instead of returning the full accessible student list just to compute `.length`
+- changed dashboard announcement loading to return only the recent items plus a published count, instead of loading the whole announcement history for the card view
+- added a regression test for the new dashboard overview response
+
+### Frontend changes
+
+- changed `SSGDashboard`, `SgDashboard`, and `OrgDashboard` to use the single dashboard overview API for stats, recent announcements, and child unit summaries
+- changed `useGovernanceWorkspace()` to dedupe simultaneous `fetchGovernanceUnitDetails()` requests so the dashboard page and the sidebar can share one in-flight unit-detail call
+
+### Route or schema impact
+
+- added `GET /api/governance/units/{governance_unit_id}/dashboard-overview`
+- added dashboard response schemas for:
+  - recent announcement summaries
+  - child unit summaries with `member_count`
+  - dashboard overview counts
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Log in as an `SSG`, `SG`, or `ORG` officer with dashboard access.
+2. Open `/ssg_dashboard`, `/sg_dashboard`, or `/org_dashboard` and confirm the page loads with the same cards, recent announcements, and child unit lists as before.
+3. Confirm the browser now calls `GET /api/governance/units/{governance_unit_id}/dashboard-overview` instead of loading the full accessible student list and then one detail request per child unit.
+4. For `SSG` and `SG`, confirm child unit cards still show the correct member counts.
+5. For any unit with many students, confirm the dashboard still shows the correct total without loading the whole student directory first.
+
+## 2026-03-22 - Reduce Manage Users page-load overhead
+
+### Purpose
+
+Improved `Manage Users` load time by making the `/users/` list routes eager-load the relations that page serialization needs and by deferring department and program lookups until the edit modal is opened.
+
+### Main files
+
+- `Backend/app/routers/users.py`
+- `Backend/app/tests/test_api.py`
+- `Frontend/src/pages/ManageUsers.tsx`
+- `Backend/docs/BACKEND_GOVERNANCE_HIERARCHY_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- changed `/users/` and `/users/by-role/{role_name}` to eager-load `roles.role` and `student_profile` before serialization
+- changed actor-scoped single-user lookups to reuse the same eager-loading helper so edit, delete, and detail responses do not fall back to lazy relation queries
+- added a regression test that confirms paginated `/users/` responses still include the student profile fields Manage Users uses
+
+### Frontend changes
+
+- stopped loading `/departments/` and `/programs/` during the initial Manage Users page open
+- changed the edit modal flow to fetch academic options only when a user starts editing
+- changed the edit state bootstrap to use `department_id` and `program_id` directly from the paged user payload
+
+### Route or schema impact
+
+- no route shape changes
+- no schema changes
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Log in as an `admin` or `campus_admin` user with more than `100` users in the current school.
+2. Open `Manage Users` and confirm the first page loads without waiting for department and program option requests.
+3. Open an edit modal for a student user and confirm department and program dropdown values still populate correctly.
+4. Page through `Manage Users` and confirm the list still returns student IDs, roles, and academic IDs correctly.
+
+## 2026-03-22 - Paginate governance student directories for SSG, SG, and ORG
+
+### Purpose
+
+Stopped the governance student pages from loading every accessible student at once by adding backend pagination support and wiring the SSG, SG, and ORG student directories to page through `100` records at a time.
+
+### Main files
+
+- `Backend/app/routers/governance_hierarchy.py`
+- `Backend/app/services/governance_hierarchy_service.py`
+- `Backend/app/tests/test_governance_hierarchy_api.py`
+- `Frontend/src/api/governanceHierarchyApi.ts`
+- `Frontend/src/pages/SsgStudents.tsx`
+- `Frontend/src/pages/GovernanceStudentsPage.tsx`
+- `Frontend/src/css/SsgWorkspace.css`
+- `Backend/docs/BACKEND_GOVERNANCE_HIERARCHY_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- changed `get_accessible_students()` to accept `skip` and `limit`
+- changed `GET /api/governance/students` to accept pagination query params without changing the response body shape
+- kept old callers compatible by leaving `limit` optional so existing consumers can still request the full accessible list when needed
+
+### Frontend changes
+
+- changed `/ssg_students`, `/sg_students`, and `/org_students` to fetch `101` rows, render `100`, and use the extra row to decide whether a next page exists
+- added `Previous` and `Next` controls plus page summaries to the governance student directory screens
+- updated the stats labels on those pages so they describe the current loaded page instead of the full governance scope
+
+### Route or schema impact
+
+- `GET /api/governance/students` now supports:
+  - `skip`
+  - `limit`
+- response shape remains `list[GovernanceAccessibleStudentResponse]`
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Log in as an `SSG`, `SG`, or `ORG` user with `view_students` or `manage_students`.
+2. Ensure the accessible governance scope contains more than `100` students.
+3. Open the corresponding student page and confirm only `100` rows load at a time.
+4. Click `Next` and confirm the next page of students appears.
+5. Confirm `Previous` returns to the earlier page.
+
+## 2026-03-22 - Add preview cleanup action to remove invalid rows
+
+### Purpose
+
+Added a preview-side cleanup action so Campus Admin users can drop preview-failed rows and continue importing only the already valid rows without re-uploading the workbook.
+
+### Main files
+
+- `Backend/app/routers/admin_import.py`
+- `Backend/app/tests/test_admin_import_preview_flow.py`
+- `Frontend/src/api/schoolSettingsApi.ts`
+- `Frontend/src/pages/SchoolImportUsers.tsx`
+- `Backend/docs/BACKEND_BULK_IMPORT_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- added `POST /api/admin/import-preview-errors/{preview_token}/remove-invalid`
+- changed preview manifest handling so the same preview token can be rewritten after invalid rows are removed
+- changed the cleanup route to keep only previously approved rows, clear `error_rows`, and return an updated preview response
+- added an audit log entry when a user cleans an invalid preview into an importable one
+
+### Frontend changes
+
+- added a `Remove Invalid Rows` button to the preview error actions
+- changed the preview screen to let users continue with the valid rows after cleanup instead of forcing a full re-upload
+
+### Route or schema impact
+
+- added `POST /api/admin/import-preview-errors/{preview_token}/remove-invalid`
+- the route returns the standard `ImportPreviewResponse` shape with updated counts after cleanup
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Preview a workbook that contains both valid rows and invalid rows.
+2. Confirm the preview shows the new `Remove Invalid Rows` action.
+3. Click `Remove Invalid Rows` and confirm the preview changes to `can_commit=true` and `invalid_rows=0`.
+4. Import using the same preview token and confirm the job is queued successfully.
+
+## 2026-03-22 - Add preview error downloads for student bulk import
+
+### Purpose
+
+Added preview-side error actions so users can download a full preview error report and a retry workbook containing only preview-failed rows before the import job is queued.
+
+### Main files
+
+- `Backend/app/routers/admin_import.py`
+- `Backend/app/tests/test_admin_import_preview_flow.py`
+- `Frontend/src/api/schoolSettingsApi.ts`
+- `Frontend/src/pages/SchoolImportUsers.tsx`
+- `Backend/docs/BACKEND_BULK_IMPORT_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- changed preview manifest storage to persist both approved rows and preview-failed rows
+- changed preview tokens to be stored even when preview has invalid rows so preview-only downloads can use the same token
+- added `GET /api/admin/import-preview-errors/{preview_token}/download` to export an Excel error report
+- added `GET /api/admin/import-preview-errors/{preview_token}/retry-download` to export an Excel retry file with only failed preview rows
+- changed `POST /api/admin/import-students` to reject preview tokens whose manifest still has invalid rows
+
+### Frontend changes
+
+- added preview-side buttons for `Download Preview Errors` and `Download Retry File`
+- kept the main import button blocked while preview still has invalid rows
+
+### Route or schema impact
+
+- `POST /api/admin/import-students/preview` still returns `preview_token`, but the token now exists for invalid previews too when a preview manifest is created
+- added `GET /api/admin/import-preview-errors/{preview_token}/download`
+- added `GET /api/admin/import-preview-errors/{preview_token}/retry-download`
+- `POST /api/admin/import-students` now returns `400` with `Preview still has invalid rows. Fix them before importing.` when an invalid preview token is submitted
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Preview a workbook with invalid rows.
+2. Confirm the preview section shows `Download Preview Errors` and `Download Retry File`.
+3. Download the preview error report and confirm the workbook includes an `Error` column.
+4. Download the retry file and confirm it contains only the failed preview rows in template format.
+5. Submit that invalid preview token to `POST /api/admin/import-students` and confirm the backend returns `400`.
+
+## 2026-03-22 - Prevent large preview duplicate checks from crashing PostgreSQL
+
+### Purpose
+
+Fixed a bulk import preview crash where large uploads could fail with `500 Internal Server Error` because duplicate-check queries generated an oversized `IN (...)` expression for student IDs.
+
+### Main files
+
+- `Backend/app/repositories/import_repository.py`
+- `Backend/app/tests/test_import_repository.py`
+- `Backend/docs/BACKEND_BULK_IMPORT_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- changed `existing_emails(...)` to query in chunks instead of one large `IN (...)` list
+- changed `existing_school_student_pairs(...)` to group lookups by school and query student IDs in chunks
+- removed the large tuple-based `(school_id, student_id) IN (...)` lookup that could trigger PostgreSQL `stack depth limit exceeded` on large previews
+
+### Route or schema impact
+
+- no route or schema shape change
+- `POST /api/admin/import-students/preview` now remains stable for larger files when checking existing student IDs and emails
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Preview a larger student workbook that previously failed with a generic preview error.
+2. Confirm the backend no longer returns `500` during the duplicate-check phase.
+3. Confirm duplicate emails and duplicate `Student_ID` values already in the database still appear as preview row errors.
+
+## 2026-03-22 - Validate department and course pairing during student import preview
+
+### Purpose
+
+Closed a validation gap in student bulk import so preview now rejects rows where the selected course exists and the department exists, but that course is not actually offered by that department.
+
+### Main files
+
+- `Backend/app/routers/admin_import.py`
+- `Backend/app/services/import_validation_service.py`
+- `Backend/app/services/student_import_service.py`
+- `Backend/app/tests/test_admin_import_preview_flow.py`
+- `Backend/docs/BACKEND_BULK_IMPORT_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- extended the bulk import validation context with department-course association pairs from `program_department_association`
+- changed row validation to reject mismatched department and course combinations with `Course is not offered by the selected Department`
+- kept the same validation rule available in both preview validation and legacy workbook revalidation paths such as retry imports
+
+### Route or schema impact
+
+- no route shape change
+- preview responses can now include `Course is not offered by the selected Department` in row errors
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Create a department and a course that are linked in the school and confirm preview accepts that row when the rest of the data is valid.
+2. Preview a row that uses an existing department and an existing course that are not linked in `program_department_association`.
+3. Confirm preview marks the row invalid with `Course is not offered by the selected Department`.
+
+## 2026-03-22 - Make student bulk import preview the authoritative validation step
+
+### Purpose
+
+Moved student bulk import to a preview-first contract so validation errors are found during preview and the import route only queues a previously approved preview artifact.
+
+### Main files
+
+- `Backend/app/routers/admin_import.py`
+- `Backend/app/repositories/import_repository.py`
+- `Backend/app/schemas/import_job.py`
+- `Backend/app/services/student_import_service.py`
+- `Backend/app/tests/test_admin_import_preview_flow.py`
+- `Frontend/src/api/schoolSettingsApi.ts`
+- `Frontend/src/pages/SchoolImportUsers.tsx`
+- `Backend/docs/BACKEND_BULK_IMPORT_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- changed `POST /api/admin/import-students/preview` to perform both workbook validation and persistent database conflict checks before approval
+- added preview manifest storage under `IMPORT_STORAGE_DIR/previews/` for preview-approved rows
+- changed `POST /api/admin/import-students` to require a preview approval token instead of accepting a direct workbook upload
+- changed the worker to consume preview manifest JSON files without re-running row validation during the normal import path
+- kept defensive insert-time conflict handling for late races that can happen after preview approval
+
+### Frontend changes
+
+- changed the school bulk import page to call preview first and submit the returned `preview_token` on import
+- added a user-facing error if the preview token is missing or expired before import is started
+
+### Route or schema impact
+
+- `POST /api/admin/import-students/preview` now returns `preview_token` for stored preview manifests, and only `can_commit=true` previews are import-eligible
+- `POST /api/admin/import-students` now expects multipart form data with `preview_token`
+- direct file-only submissions to `POST /api/admin/import-students` now return `400` with `Preview the file first before importing.`
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none beyond using the existing `IMPORT_STORAGE_DIR` for preview manifests
+
+### How to test
+
+1. Upload a valid `.xlsx` file to `POST /api/admin/import-students/preview` and confirm the response includes `can_commit=true` and a non-empty `preview_token`.
+2. Submit the returned `preview_token` to `POST /api/admin/import-students` and confirm the job is queued successfully.
+3. Submit the same workbook directly to `POST /api/admin/import-students` without preview and confirm the route returns `400` with `Preview the file first before importing.`
+4. Preview a workbook that uses an email or `Student_ID` already present in the target school and confirm the duplicate is reported during preview instead of surfacing only during import.
+
+## 2026-03-22 - Stabilize `/users/` pagination for large Manage Users lists
+
+### Purpose
+
+Fixed the Campus Admin Manage Users roster so imported student accounts beyond the first backend page can be loaded reliably after large bulk imports.
+
+### Main files
+
+- `Backend/app/routers/users.py`
+- `Frontend/src/pages/ManageUsers.tsx`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+- `Backend/docs/BACKEND_GOVERNANCE_HIERARCHY_GUIDE.md`
+
+### Backend changes
+
+- changed `GET /users/` to apply a stable ascending `User.id` sort before pagination
+- changed `GET /users/by-role/{role_name}` to apply the same stable ascending `User.id` sort before pagination
+- normalized `skip` to a minimum of `0`
+- capped `limit` to the range `1..500` so callers can page through large schools without unbounded reads
+
+### Frontend changes
+
+- updated `Manage Users` to request all pages in batches instead of relying on the backend default first page
+- this keeps imported students visible in the roster even when the school has more than 100 users
+
+### Route or schema impact
+
+- `GET /users/` still returns the same `UserWithRelations[]` schema, but pagination order is now deterministic
+- `GET /users/by-role/{role_name}` still returns the same `UserWithRelations[]` schema, but pagination order is now deterministic
+
+### Migration impact
+
+- none
+
+### Configuration impact
+
+- none
+
+### How to test
+
+1. Import more than 100 students into one school.
+2. Call `GET /users/?skip=0&limit=100` and `GET /users/?skip=100&limit=100` with the same school-scoped Campus Admin token and confirm the two pages are ordered by increasing user ID with no overlap.
+3. Open `Manage Users` as that Campus Admin and confirm the roster includes imported students beyond the first 100 users.
+4. Search for one of the newly imported `student_id` values in `Manage Users` and confirm the record appears.
+
+## 2026-03-22 - Add public login-page multi-face attendance kiosk
+
+### Purpose
+
+Added a public attendance kiosk flow for the login page so nearby geofenced events can record multi-face event attendance without signing students into the web app.
+
+### Main files
+
+- `Backend/app/core/config.py`
+- `Backend/app/main.py`
+- `Backend/app/routers/public_attendance.py`
+- `Backend/app/routers/face_recognition.py`
+- `Backend/app/schemas/public_attendance.py`
+- `Backend/app/services/attendance_face_scan.py`
+- `Backend/app/services/face_recognition.py`
+- `Backend/app/tests/test_public_attendance.py`
+- `Backend/docs/BACKEND_FACE_GEO_MERGE_GUIDE.md`
+- `Backend/docs/BACKEND_CHANGELOG.md`
+
+### Backend changes
+
+- added a new unauthenticated public kiosk router under `/public-attendance`
+- added nearby-event discovery that:
+  - uses the caller GPS location
+  - returns only geofenced events whose radius currently passes
+  - supports multiple active schools and returns nearby events across campuses
+  - only returns events in an active sign-in or sign-out phase
+- added public multi-face attendance scanning that:
+  - detects multiple faces in one frame
+  - runs per-face liveness and encoding
+  - enforces a max-faces-per-frame limit
+  - prevents the same student from being accepted twice in one frame
+  - supports client cooldown hints so the same accepted student is not reprocessed every frame
+- added phase-based kiosk attendance persistence:
+  - sign-in phase creates `time_in` only when no active attendance exists
+  - sign-in phase returns `already_signed_in` or `already_signed_out` instead of creating duplicates
+  - sign-out phase creates `time_out` only when an active attendance exists
+  - sign-out phase rejects students who do not have an active event sign-in
+- public scan outcomes now distinguish:
+  - `time_in`
+  - `time_out`
+  - `already_signed_in`
+  - `already_signed_out`
+  - `rejected`
+  - `out_of_scope`
+  - `no_match`
+  - `liveness_failed`
+  - `duplicate_face`
+  - `cooldown_skipped`
+- tightened the authenticated `/face/face-scan-with-recognition` route so its match candidate pool now follows the event scope instead of searching every registered student in the school
+- reused existing event scope rules:
+  - no department/program scope means campus-wide
+  - department-only scope means SG-style department scope
+  - program scope means ORG-style program scope, optionally together with the department on the event
+
+### Route or schema impact
+
+- added `POST /public-attendance/events/nearby`
+- added `POST /public-attendance/events/{event_id}/multi-face-scan`
+- added new public request/response schemas in `Backend/app/schemas/public_attendance.py`
+- authenticated `POST /face/face-scan-with-recognition` now matches only students inside the selected event scope
+
+### Migration impact
+
+- no database migration required
+- new backend configuration values:
+  - `PUBLIC_ATTENDANCE_ENABLED`
+  - `PUBLIC_ATTENDANCE_MAX_FACES_PER_FRAME`
+  - `PUBLIC_ATTENDANCE_SCAN_COOLDOWN_SECONDS`
+  - `PUBLIC_ATTENDANCE_EVENT_LOOKAHEAD_HOURS`
+
+### How to test
+
+- run `Backend\.venv\Scripts\python.exe -m pytest -q Backend/app/tests/test_public_attendance.py Backend/app/tests/test_event_geolocation_service.py Backend/app/tests/test_geolocation.py`
+- run `npm run build` from `Frontend/`
+- manual check:
+  - open `/login` or `/`
+  - allow browser location and confirm nearby events appear only when the device is inside an event geofence
+  - select an event and allow camera access
+  - confirm multiple visible students can be processed in one frame
+  - confirm repeated frames do not keep logging the same accepted student during the cooldown window
+  - confirm sign-in phase creates new attendance records, sign-out phase only closes active records, and out-of-scope or unmatched faces show rejection results without exposing directory data
+
 ## 2026-03-21 - Add near-start attendance override windows for event create and edit
 
 ### Purpose

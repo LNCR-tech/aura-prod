@@ -33,6 +33,7 @@ class ValidationContext:
     target_school_id: int
     department_lookup: Dict[str, int]
     course_lookup: Dict[str, int]
+    department_course_pairs: set[Tuple[int, int]] = field(default_factory=set)
     seen_emails: set[str] = field(default_factory=set)
     seen_school_student: set[Tuple[int, str]] = field(default_factory=set)
     seen_rows: set[Tuple[str, ...]] = field(default_factory=set)
@@ -133,6 +134,12 @@ def validate_and_transform_row(
     course_id = context.course_lookup.get(course_key)
     if course_id is None and row_data["Course"]:
         errors.append("Course does not exist")
+    elif (
+        department_id is not None
+        and course_id is not None
+        and (department_id, course_id) not in context.department_course_pairs
+    ):
+        errors.append("Course is not offered by the selected Department")
 
     if errors:
         return None, errors, row_data
@@ -168,6 +175,8 @@ def suggest_fixes(errors: List[str]) -> List[str]:
             suggestions.append("Use an existing department name exactly as listed in the system.")
         elif "course does not exist" in lowered:
             suggestions.append("Use an existing course/program name exactly as listed in the system.")
+        elif "not offered by the selected department" in lowered:
+            suggestions.append("Choose a course/program that is linked to the selected department.")
         elif "duplicate student_id" in lowered:
             suggestions.append("Ensure Student_ID values are unique within the school and file.")
         elif "duplicate email" in lowered:

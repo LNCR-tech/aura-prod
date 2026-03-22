@@ -36,6 +36,9 @@ from app.schemas.governance_hierarchy import (
     GovernanceAccessResponse,
     GovernanceAccessUnitResponse,
     GovernanceAnnouncementCreate,
+    GovernanceDashboardAnnouncementSummaryResponse,
+    GovernanceDashboardChildUnitSummaryResponse,
+    GovernanceDashboardOverviewResponse,
     GovernanceAnnouncementMonitorResponse,
     GovernanceAnnouncementResponse,
     GovernanceAnnouncementUpdate,
@@ -49,6 +52,7 @@ from app.schemas.governance_hierarchy import (
     GovernanceStudentCandidateResponse,
     GovernanceUnitCreate,
     GovernanceUnitPermissionAssign,
+    GovernanceUnitSummaryResponse,
     GovernanceUnitUpdate,
 )
 
@@ -69,6 +73,11 @@ CHILD_VIEW_PERMISSION_MAP: dict[GovernanceUnitType, set[PermissionCode]] = {
         PermissionCode.MANAGE_MEMBERS,
         PermissionCode.ASSIGN_PERMISSIONS,
     },
+}
+
+CHILD_DASHBOARD_UNIT_TYPE_MAP: dict[GovernanceUnitType, GovernanceUnitType] = {
+    GovernanceUnitType.SSG: GovernanceUnitType.SG,
+    GovernanceUnitType.SG: GovernanceUnitType.ORG,
 }
 
 UNIT_MEMBER_PERMISSION_WHITELIST: dict[GovernanceUnitType, set[PermissionCode]] = {
@@ -334,6 +343,28 @@ def _get_active_governance_memberships(
         .all()
     )
     return [_prepare_governance_member(membership) for membership in memberships]
+
+
+def _get_membership_for_unit(
+    memberships: Iterable[GovernanceMember],
+    *,
+    governance_unit_id: int,
+) -> GovernanceMember | None:
+    for membership in memberships:
+        if membership.governance_unit_id == governance_unit_id:
+            return membership
+    return None
+
+
+def _get_membership_permission_codes(
+    membership: GovernanceMember | None,
+) -> set[PermissionCode]:
+    if membership is None:
+        return set()
+    return {
+        member_permission.permission.permission_code
+        for member_permission in membership.member_permissions
+    }
 
 
 def _get_parent_membership(
@@ -1203,11 +1234,36 @@ def list_governance_units(
     unit_type: GovernanceUnitType | None = None,
     parent_unit_id: int | None = None,
     include_inactive: bool = False,
-) -> list[GovernanceUnit]:
+) -> list[GovernanceUnitSummaryResponse]:
     school_id = get_school_id_or_403(current_user)
     ensure_permission_catalog(db)
 
-    query = _governance_unit_query(db).filter(GovernanceUnit.school_id == school_id)
+    query = (
+        db.query(
+            GovernanceUnit.id,
+            GovernanceUnit.unit_code,
+            GovernanceUnit.unit_name,
+            GovernanceUnit.description,
+            GovernanceUnit.unit_type,
+            GovernanceUnit.parent_unit_id,
+            GovernanceUnit.school_id,
+            GovernanceUnit.department_id,
+            GovernanceUnit.program_id,
+            GovernanceUnit.created_by_user_id,
+            GovernanceUnit.is_active,
+            GovernanceUnit.created_at,
+            GovernanceUnit.updated_at,
+            func.count(GovernanceMember.id).label("member_count"),
+        )
+        .outerjoin(
+            GovernanceMember,
+            and_(
+                GovernanceMember.governance_unit_id == GovernanceUnit.id,
+                GovernanceMember.is_active.is_(True),
+            ),
+        )
+        .filter(GovernanceUnit.school_id == school_id)
+    )
     if unit_type is not None:
         query = query.filter(GovernanceUnit.unit_type == unit_type)
     if parent_unit_id is not None:
@@ -1216,8 +1272,37 @@ def list_governance_units(
         query = query.filter(GovernanceUnit.is_active.is_(True))
 
     governance_units = [
-        _prepare_governance_unit(governance_unit)
-        for governance_unit in query.order_by(
+        GovernanceUnitSummaryResponse(
+            id=governance_unit.id,
+            unit_code=governance_unit.unit_code,
+            unit_name=governance_unit.unit_name,
+            description=governance_unit.description,
+            unit_type=governance_unit.unit_type,
+            parent_unit_id=governance_unit.parent_unit_id,
+            school_id=governance_unit.school_id,
+            department_id=governance_unit.department_id,
+            program_id=governance_unit.program_id,
+            created_by_user_id=governance_unit.created_by_user_id,
+            is_active=governance_unit.is_active,
+            created_at=governance_unit.created_at,
+            updated_at=governance_unit.updated_at,
+            member_count=governance_unit.member_count or 0,
+        )
+        for governance_unit in query.group_by(
+            GovernanceUnit.id,
+            GovernanceUnit.unit_code,
+            GovernanceUnit.unit_name,
+            GovernanceUnit.description,
+            GovernanceUnit.unit_type,
+            GovernanceUnit.parent_unit_id,
+            GovernanceUnit.school_id,
+            GovernanceUnit.department_id,
+            GovernanceUnit.program_id,
+            GovernanceUnit.created_by_user_id,
+            GovernanceUnit.is_active,
+            GovernanceUnit.created_at,
+            GovernanceUnit.updated_at,
+        ).order_by(
             GovernanceUnit.unit_type.asc(),
             GovernanceUnit.unit_name.asc(),
         ).all()
@@ -1226,10 +1311,27 @@ def list_governance_units(
     if _is_school_it(current_user):
         return governance_units
 
+    memberships = _get_active_governance_memberships(
+        db,
+        school_id=school_id,
+        user_id=current_user.id,
+    )
+    membership_permission_codes_by_unit_id = {
+        membership.governance_unit_id: _get_membership_permission_codes(membership)
+        for membership in memberships
+    }
+
     return [
         governance_unit
         for governance_unit in governance_units
-        if _can_view_governance_unit(db, current_user=current_user, governance_unit=governance_unit)
+        if governance_unit.id in membership_permission_codes_by_unit_id
+        or (
+            governance_unit.parent_unit_id is not None
+            and bool(
+                membership_permission_codes_by_unit_id.get(governance_unit.parent_unit_id, set())
+                & CHILD_VIEW_PERMISSION_MAP.get(governance_unit.unit_type, set())
+            )
+        )
     ]
 
 
@@ -1858,12 +1960,244 @@ def assign_unit_permission(
     )
 
 
+def _count_accessible_students(
+    db: Session,
+    *,
+    current_user: User,
+    memberships: list[GovernanceMember] | None = None,
+    permission_codes: Iterable[PermissionCode] | None = None,
+    unit_type: GovernanceUnitType | None = None,
+) -> int:
+    school_id = get_school_id_or_403(current_user)
+    query = db.query(func.count(StudentProfile.id)).filter(StudentProfile.school_id == school_id)
+
+    if _is_school_it(current_user):
+        return query.scalar() or 0
+
+    active_memberships = memberships or _get_active_governance_memberships(
+        db,
+        school_id=school_id,
+        user_id=current_user.id,
+    )
+    required_permission_codes = set(
+        permission_codes or {PermissionCode.VIEW_STUDENTS, PermissionCode.MANAGE_STUDENTS}
+    )
+
+    permitted_units = [
+        membership.governance_unit
+        for membership in active_memberships
+        if (unit_type is None or membership.governance_unit.unit_type == unit_type)
+        and _membership_has_any_permission(membership, required_permission_codes)
+    ]
+
+    if not permitted_units:
+        return 0
+
+    if any(unit.department_id is None and unit.program_id is None for unit in permitted_units):
+        return query.scalar() or 0
+
+    filters = []
+    for governance_unit in permitted_units:
+        condition_parts = []
+        if governance_unit.department_id is not None:
+            condition_parts.append(StudentProfile.department_id == governance_unit.department_id)
+        if governance_unit.program_id is not None:
+            condition_parts.append(StudentProfile.program_id == governance_unit.program_id)
+        if condition_parts:
+            filters.append(and_(*condition_parts))
+
+    if not filters:
+        return 0
+
+    return query.filter(or_(*filters)).scalar() or 0
+
+
+def _list_dashboard_child_units(
+    db: Session,
+    *,
+    current_user: User,
+    governance_unit: GovernanceUnit,
+    memberships: list[GovernanceMember],
+) -> list[GovernanceDashboardChildUnitSummaryResponse]:
+    child_unit_type = CHILD_DASHBOARD_UNIT_TYPE_MAP.get(governance_unit.unit_type)
+    if child_unit_type is None:
+        return []
+
+    query = db.query(
+        GovernanceUnit.id,
+        GovernanceUnit.unit_code,
+        GovernanceUnit.unit_name,
+        GovernanceUnit.description,
+        GovernanceUnit.unit_type,
+    ).filter(
+        GovernanceUnit.school_id == governance_unit.school_id,
+        GovernanceUnit.parent_unit_id == governance_unit.id,
+        GovernanceUnit.unit_type == child_unit_type,
+        GovernanceUnit.is_active.is_(True),
+    )
+
+    if not _is_school_it(current_user):
+        direct_membership_unit_ids = {
+            membership.governance_unit_id
+            for membership in memberships
+            if membership.governance_unit.parent_unit_id == governance_unit.id
+            and membership.governance_unit.unit_type == child_unit_type
+        }
+        current_unit_membership = _get_membership_for_unit(
+            memberships,
+            governance_unit_id=governance_unit.id,
+        )
+        can_view_all_children = (
+            current_unit_membership is not None
+            and _membership_has_any_permission(
+                current_unit_membership,
+                CHILD_VIEW_PERMISSION_MAP.get(child_unit_type, set()),
+            )
+        )
+
+        if not can_view_all_children:
+            if not direct_membership_unit_ids:
+                return []
+            query = query.filter(GovernanceUnit.id.in_(direct_membership_unit_ids))
+
+    child_units = query.order_by(GovernanceUnit.unit_name.asc(), GovernanceUnit.id.asc()).all()
+    if not child_units:
+        return []
+
+    child_unit_ids = [child_unit.id for child_unit in child_units]
+    member_count_rows = (
+        db.query(
+            GovernanceMember.governance_unit_id,
+            func.count(GovernanceMember.id),
+        )
+        .filter(
+            GovernanceMember.governance_unit_id.in_(child_unit_ids),
+            GovernanceMember.is_active.is_(True),
+        )
+        .group_by(GovernanceMember.governance_unit_id)
+        .all()
+    )
+    member_count_map = {
+        governance_unit_id: member_count
+        for governance_unit_id, member_count in member_count_rows
+    }
+
+    return [
+        GovernanceDashboardChildUnitSummaryResponse(
+            id=child_unit.id,
+            unit_code=child_unit.unit_code,
+            unit_name=child_unit.unit_name,
+            description=child_unit.description,
+            unit_type=child_unit.unit_type,
+            member_count=member_count_map.get(child_unit.id, 0),
+        )
+        for child_unit in child_units
+    ]
+
+
+def get_governance_dashboard_overview(
+    db: Session,
+    *,
+    current_user: User,
+    governance_unit_id: int,
+) -> GovernanceDashboardOverviewResponse:
+    school_id = get_school_id_or_403(current_user)
+    governance_unit = _get_unit_in_school_or_404(
+        db,
+        school_id=school_id,
+        governance_unit_id=governance_unit_id,
+    )
+
+    if not _can_view_governance_unit(db, current_user=current_user, governance_unit=governance_unit):
+        raise HTTPException(status_code=404, detail="Governance unit not found")
+
+    memberships = _get_active_governance_memberships(
+        db,
+        school_id=school_id,
+        user_id=current_user.id,
+    )
+    current_unit_membership = _get_membership_for_unit(
+        memberships,
+        governance_unit_id=governance_unit.id,
+    )
+    can_manage_announcements = _is_school_it(current_user) or (
+        current_unit_membership is not None
+        and _membership_has_permission(current_unit_membership, PermissionCode.MANAGE_ANNOUNCEMENTS)
+    )
+    can_view_students = _is_school_it(current_user) or (
+        current_unit_membership is not None
+        and _membership_has_any_permission(
+            current_unit_membership,
+            {PermissionCode.VIEW_STUDENTS, PermissionCode.MANAGE_STUDENTS},
+        )
+    )
+
+    recent_announcements: list[GovernanceDashboardAnnouncementSummaryResponse] = []
+    published_announcement_count = 0
+    if can_manage_announcements:
+        recent_announcements = [
+            GovernanceDashboardAnnouncementSummaryResponse(
+                id=announcement.id,
+                title=announcement.title,
+                status=announcement.status,
+                author_name=announcement.author_name,
+                updated_at=announcement.updated_at,
+            )
+            for announcement in (
+                db.query(GovernanceAnnouncement)
+                .filter(
+                    GovernanceAnnouncement.school_id == school_id,
+                    GovernanceAnnouncement.governance_unit_id == governance_unit.id,
+                )
+                .order_by(GovernanceAnnouncement.updated_at.desc(), GovernanceAnnouncement.id.desc())
+                .limit(5)
+                .all()
+            )
+        ]
+        published_announcement_count = (
+            db.query(func.count(GovernanceAnnouncement.id))
+            .filter(
+                GovernanceAnnouncement.school_id == school_id,
+                GovernanceAnnouncement.governance_unit_id == governance_unit.id,
+                GovernanceAnnouncement.status == GovernanceAnnouncementStatus.PUBLISHED,
+            )
+            .scalar()
+            or 0
+        )
+
+    total_students = 0
+    if can_view_students:
+        student_scope_unit_type = None if governance_unit.unit_type == GovernanceUnitType.SSG else governance_unit.unit_type
+        total_students = _count_accessible_students(
+            db,
+            current_user=current_user,
+            memberships=memberships,
+            unit_type=student_scope_unit_type,
+        )
+
+    return GovernanceDashboardOverviewResponse(
+        governance_unit_id=governance_unit.id,
+        unit_type=governance_unit.unit_type,
+        published_announcement_count=published_announcement_count,
+        total_students=total_students,
+        recent_announcements=recent_announcements,
+        child_units=_list_dashboard_child_units(
+            db,
+            current_user=current_user,
+            governance_unit=governance_unit,
+            memberships=memberships,
+        ),
+    )
+
+
 def get_accessible_students(
     db: Session,
     *,
     current_user: User,
     permission_codes: Iterable[PermissionCode] | None = None,
     unit_type: GovernanceUnitType | None = None,
+    skip: int = 0,
+    limit: int | None = None,
 ) -> list[StudentProfile]:
     school_id = get_school_id_or_403(current_user)
     query = (
@@ -1875,9 +2209,17 @@ def get_accessible_students(
         )
         .filter(StudentProfile.school_id == school_id)
     )
+    safe_skip = max(skip, 0)
+    safe_limit = None if limit is None else max(1, min(limit, 250))
+
+    def _finalize(student_query):
+        student_query = student_query.order_by(StudentProfile.id.asc()).offset(safe_skip)
+        if safe_limit is not None:
+            student_query = student_query.limit(safe_limit)
+        return student_query.all()
 
     if _is_school_it(current_user):
-        return query.order_by(StudentProfile.id.asc()).all()
+        return _finalize(query)
 
     memberships = _get_active_governance_memberships(
         db,
@@ -1898,7 +2240,7 @@ def get_accessible_students(
         return []
 
     if any(unit.department_id is None and unit.program_id is None for unit in permitted_units):
-        return query.order_by(StudentProfile.id.asc()).all()
+        return _finalize(query)
 
     filters = []
     for governance_unit in permitted_units:
@@ -1913,7 +2255,7 @@ def get_accessible_students(
     if not filters:
         return []
 
-    return query.filter(or_(*filters)).order_by(StudentProfile.id.asc()).all()
+    return _finalize(query.filter(or_(*filters)))
 
 
 def list_governance_announcements(

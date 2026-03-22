@@ -37,6 +37,12 @@ There are two related but different face flows in the backend:
    - used for student face registration and event attendance scanning
    - verifies liveness, face match, geofence, and attendance timing
 
+3. Public login-page attendance kiosk
+   - used by the unauthenticated login page
+   - lists nearby geofenced events based on browser GPS
+   - runs multi-face attendance scanning without logging the student into the app
+   - still uses the selected event scope to decide whether a matched face is eligible
+
 Geolocation is used in event attendance, not in privileged login.
 
 ## Backend File Map
@@ -56,6 +62,11 @@ Geolocation is used in event attendance, not in privileged login.
   - event geofence verification response building
   - shared location verification used by both `events.py` and `face_recognition.py`
   - attendance travel-speed risk checks for face attendance scans
+
+- `Backend/app/services/attendance_face_scan.py`
+  - event-scoped student candidate loading
+  - public kiosk attendance phase resolution
+  - public sign-in/sign-out persistence rules
 
 - `Backend/app/services/geolocation.py`
   - coordinate validation
@@ -83,6 +94,10 @@ Geolocation is used in event attendance, not in privileged login.
   - student face registration
   - student face verification
   - combined face plus location attendance scan
+
+- `Backend/app/routers/public_attendance.py`
+  - public login-page nearby-event discovery
+  - public multi-face attendance scanning
 
 - `Backend/app/routers/events.py`
   - event create and update with geofence fields
@@ -156,6 +171,21 @@ Geolocation is used in event attendance, not in privileged login.
 - `POST /face/face-scan-with-recognition`
   - combined attendance route
   - checks face, liveness, location, and sign-in or sign-out state
+  - now limits the match candidate pool to the selected event scope instead of the whole school
+
+### Public kiosk routes
+
+- `POST /public-attendance/events/nearby`
+  - receives browser GPS coordinates
+  - returns nearby geofenced events whose attendance phase is currently active
+  - can return events from different active schools if the device is inside those geofences
+
+- `POST /public-attendance/events/{event_id}/multi-face-scan`
+  - accepts one live camera frame plus current GPS coordinates
+  - detects multiple faces in a frame
+  - applies per-face liveness and face matching
+  - records sign-in or sign-out using the event's current attendance phase
+  - returns per-face results such as `time_in`, `time_out`, `out_of_scope`, `no_match`, and `liveness_failed`
 
 ### Event geolocation routes
 
@@ -429,6 +459,27 @@ Current behavior:
 
 This avoids marking a student present when they only signed in briefly or outside the event timing, and it keeps non-attendees from being left without an attendance outcome.
 
+## E. Public Kiosk Scope Rules
+
+The public kiosk does not authenticate the student into the web app. It only records attendance against the selected event.
+
+Current scope behavior:
+
+- campus-wide event:
+  - no departments or programs on the event
+  - all registered student faces in that school are eligible
+
+- SG-style department event:
+  - event has department scope and no program scope
+  - only students from that department are eligible
+
+- ORG-style program event:
+  - event has program scope
+  - only students in that program are eligible
+  - if the event also includes a department, the student must match that department too
+
+When a face matches a registered student in the school but not the selected event scope, the public API returns an `out_of_scope` result with generic messaging instead of exposing student-directory details.
+
 ## Suggested Testing Order
 
 1. Run `alembic upgrade head`.
@@ -442,7 +493,12 @@ This avoids marking a student present when they only signed in briefly or outsid
 6. Test student face registration.
 7. Test student event sign-in.
 8. Test student event sign-out.
-9. Confirm the final attendance status after sign-out.
+9. Test the public kiosk:
+   - load nearby events from `/login`
+   - select one nearby event
+   - scan multiple faces in one frame
+   - confirm duplicate students are throttled and out-of-scope students are rejected
+10. Confirm the final attendance status after sign-out.
 
 ## Practical Notes
 
@@ -458,8 +514,10 @@ The active backend runtime is:
 - `Backend/app/routers/auth.py`
 - `Backend/app/routers/security_center.py`
 - `Backend/app/routers/face_recognition.py`
+- `Backend/app/routers/public_attendance.py`
 - `Backend/app/routers/events.py`
 - `Backend/app/services/face_recognition.py`
+- `Backend/app/services/attendance_face_scan.py`
 - `Backend/app/services/event_geolocation.py`
 - `Backend/app/services/geolocation.py`
 - `Backend/app/services/auth_session.py`

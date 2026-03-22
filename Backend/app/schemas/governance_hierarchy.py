@@ -103,7 +103,7 @@ class GovernanceUnitUpdate(BaseModel):
     description: Optional[str] = Field(default=None, max_length=1000)
 
 
-class GovernanceUnitSummaryResponse(BaseModel):
+class GovernanceUnitBaseResponse(BaseModel):
     id: int
     unit_code: str
     unit_name: str
@@ -120,7 +120,11 @@ class GovernanceUnitSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class GovernanceUnitDetailResponse(GovernanceUnitSummaryResponse):
+class GovernanceUnitSummaryResponse(GovernanceUnitBaseResponse):
+    member_count: int = 0
+
+
+class GovernanceUnitDetailResponse(GovernanceUnitBaseResponse):
     members: list[GovernanceMemberResponse] = Field(default_factory=list)
     unit_permissions: list[GovernanceUnitPermissionResponse] = Field(default_factory=list)
 
@@ -166,6 +170,32 @@ class GovernanceAccessibleStudentResponse(BaseModel):
     user: GovernanceUserSummary
     student_profile: GovernanceStudentProfileSummary
     model_config = ConfigDict(from_attributes=True)
+
+
+class GovernanceDashboardAnnouncementSummaryResponse(BaseModel):
+    id: int
+    title: str
+    status: GovernanceAnnouncementStatus
+    author_name: Optional[str] = None
+    updated_at: datetime
+
+
+class GovernanceDashboardChildUnitSummaryResponse(BaseModel):
+    id: int
+    unit_code: str
+    unit_name: str
+    description: Optional[str] = None
+    unit_type: GovernanceUnitType
+    member_count: int = 0
+
+
+class GovernanceDashboardOverviewResponse(BaseModel):
+    governance_unit_id: int
+    unit_type: GovernanceUnitType
+    published_announcement_count: int = 0
+    total_students: int = 0
+    recent_announcements: list[GovernanceDashboardAnnouncementSummaryResponse] = Field(default_factory=list)
+    child_units: list[GovernanceDashboardChildUnitSummaryResponse] = Field(default_factory=list)
 
 
 class GovernanceEventDefaultsResponse(BaseModel):

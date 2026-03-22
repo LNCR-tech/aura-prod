@@ -30,7 +30,12 @@ from app.schemas.face_recognition import (
     FaceRegistrationResponse,
     FaceVerificationResponse,
 )
-from app.services.face_recognition import FaceCandidate, FaceRecognitionService
+from app.services.attendance_face_scan import (
+    get_registered_face_candidates_for_event,
+    get_registered_face_candidates_for_school,
+    student_display_name,
+)
+from app.services.face_recognition import FaceRecognitionService
 from app.services.attendance_status import (
     finalize_completed_attendance_status,
 )
@@ -45,18 +50,6 @@ from app.services import governance_hierarchy_service
 
 router = APIRouter(prefix="/face", tags=["face-recognition"])
 face_service = FaceRecognitionService()
-
-
-def _student_display_name(student: StudentProfile) -> str:
-    user = student.user
-    if user is None:
-        return student.student_id or f"Student {student.id}"
-    full_name = " ".join(
-        part.strip()
-        for part in [user.first_name or "", user.middle_name or "", user.last_name or ""]
-        if part and part.strip()
-    ).strip()
-    return full_name or student.student_id or f"Student {student.id}"
 
 
 def _require_student_profile(current_user: UserModel) -> StudentProfile:
@@ -135,35 +128,6 @@ def _attendance_scan_error_detail(
     return detail
 
 
-def _student_candidates_for_school(db: Session, school_id: int) -> list[tuple[StudentProfile, FaceCandidate]]:
-    students = (
-        db.query(StudentProfile)
-        .join(UserModel, StudentProfile.user_id == UserModel.id)
-        .filter(
-            UserModel.school_id == school_id,
-            StudentProfile.face_encoding.isnot(None),
-            StudentProfile.is_face_registered.is_(True),
-        )
-        .all()
-    )
-
-    candidates: list[tuple[StudentProfile, FaceCandidate]] = []
-    for student in students:
-        if not student.face_encoding:
-            continue
-        candidates.append(
-            (
-                student,
-                FaceCandidate(
-                    identifier=student.id,
-                    label=_student_display_name(student),
-                    encoding_bytes=bytes(student.face_encoding),
-                ),
-            )
-        )
-    return candidates
-
-
 @router.post("/register", response_model=FaceRegistrationResponse)
 def register_face_from_base64(
     payload: Base64ImageRequest,
@@ -230,7 +194,7 @@ def verify_face_against_registered_students(
         enforce_liveness=True,
     )
 
-    candidates = _student_candidates_for_school(db, school_id)
+    candidates = get_registered_face_candidates_for_school(db, school_id)
     if not candidates:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -239,7 +203,7 @@ def verify_face_against_registered_students(
 
     match = face_service.find_best_match(
         encoding,
-        [candidate for _, candidate in candidates],
+        [scoped_candidate.candidate for scoped_candidate in candidates],
     )
     if not match.matched or match.candidate is None:
         return FaceVerificationResponse(
@@ -251,8 +215,8 @@ def verify_face_against_registered_students(
         )
 
     student_lookup = {
-        candidate.identifier: student
-        for student, candidate in candidates
+        scoped_candidate.candidate.identifier: scoped_candidate.student
+        for scoped_candidate in candidates
     }
     student = student_lookup.get(match.candidate.identifier)
     if student is None:
@@ -264,7 +228,7 @@ def verify_face_against_registered_students(
     return FaceVerificationResponse(
         match_found=True,
         student_id=student.student_id,
-        student_name=_student_display_name(student),
+        student_name=student_display_name(student),
         distance=round(match.distance, 6),
         confidence=round(match.confidence, 6),
         threshold=round(match.threshold, 6),
@@ -328,16 +292,16 @@ def record_attendance_from_face_scan(
         enforce_liveness=True,
     )
 
-    candidates = _student_candidates_for_school(db, school_id)
+    candidates = get_registered_face_candidates_for_event(db, event)
     if not candidates:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No registered student faces found in this school.",
+            detail="No registered student faces found in this event scope.",
         )
 
     match = face_service.find_best_match(
         encoding,
-        [candidate for _, candidate in candidates],
+        [scoped_candidate.candidate for scoped_candidate in candidates],
         threshold=payload.threshold,
     )
     if not match.matched or match.candidate is None:
@@ -347,8 +311,8 @@ def record_attendance_from_face_scan(
         )
 
     student_lookup = {
-        candidate.identifier: student
-        for student, candidate in candidates
+        scoped_candidate.candidate.identifier: scoped_candidate.student
+        for scoped_candidate in candidates
     }
     student = student_lookup.get(match.candidate.identifier)
     if student is None:
@@ -453,7 +417,7 @@ def record_attendance_from_face_scan(
         return FaceAttendanceScanResponse(
             action="timeout",
             student_id=student.student_id,
-            student_name=_student_display_name(student),
+            student_name=student_display_name(student),
             attendance_id=active_attendance.id,
             distance=round(match.distance, 6),
             confidence=round(match.confidence, 6),
@@ -539,7 +503,7 @@ def record_attendance_from_face_scan(
     return FaceAttendanceScanResponse(
         action="time_in",
         student_id=student.student_id,
-        student_name=_student_display_name(student),
+        student_name=student_display_name(student),
         attendance_id=attendance.id,
         distance=round(match.distance, 6),
         confidence=round(match.confidence, 6),

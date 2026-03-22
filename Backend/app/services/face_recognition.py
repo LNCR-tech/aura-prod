@@ -79,6 +79,17 @@ class FaceMatchResult:
     candidate: FaceCandidate | None = None
 
 
+@dataclass
+class DetectedFaceProbe:
+    """One detected face from a probe image, including liveness and encoding state."""
+
+    index: int
+    location: tuple[int, int, int, int]
+    liveness: LivenessResult
+    encoding: np.ndarray | None = None
+    error_code: str | None = None
+
+
 # ---------------------------------------------
 # Main service class
 # This is where the face logic lives.
@@ -299,7 +310,32 @@ class FaceRecognitionService:
                 detail="Upload an image with exactly one face for liveness verification.",
             )
 
-        top, right, bottom, left = face_locations[0]
+        return self._check_liveness_for_location(rgb_image, face_locations[0])
+
+    def _check_liveness_for_location(
+        self,
+        rgb_image: np.ndarray,
+        face_location: tuple[int, int, int, int],
+    ) -> LivenessResult:
+        """Run anti-spoof against a specific detected face location."""
+        ready, reason = self.anti_spoof_status()
+        if not ready:
+            if self.settings.allow_liveness_bypass_when_model_missing:
+                return LivenessResult(
+                    label="Bypassed",
+                    score=1.0,
+                    reason=reason or "model_unavailable",
+                )
+
+            detail = "Liveness model is not available."
+            if reason:
+                detail = f"Liveness model is not available ({reason})."
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=detail,
+            )
+
+        top, right, bottom, left = face_location
         bbox_xywh = self._xyxy_to_xywh(left, top, right, bottom)
         image_bgr = rgb_image[:, :, ::-1].copy()
         input_height, input_width = self._anti_spoof_input_size or (80, 80)
@@ -338,47 +374,90 @@ class FaceRecognitionService:
         enforce_liveness: bool = False,
     ) -> tuple[np.ndarray, LivenessResult]:
         """Load an image, optionally run liveness, then return its face encoding."""
-        rgb_image = self.load_rgb_from_bytes(image_bytes)
-
-        if enforce_liveness:
-            liveness = self.check_liveness(rgb_image)
-        else:
-            liveness = LivenessResult(
-                label="Bypassed",
-                score=1.0,
-                reason="not_requested",
+        probes = self.analyze_faces_from_bytes(
+            image_bytes,
+            enforce_liveness=enforce_liveness,
+        )
+        if require_single_face and len(probes) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Image must contain exactly one face.",
             )
 
-        if enforce_liveness and not self.liveness_passed(liveness):
+        probe = probes[0]
+        if probe.error_code == "spoof_detected":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Spoof detected. label={liveness.label} score={liveness.score:.3f}",
+                detail=f"Spoof detected. label={probe.liveness.label} score={probe.liveness.score:.3f}",
+            )
+        if probe.encoding is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unable to compute a face encoding from the image.",
             )
 
+        return np.asarray(probe.encoding, dtype=np.float64), probe.liveness
+
+    def analyze_faces_from_bytes(
+        self,
+        image_bytes: bytes,
+        *,
+        enforce_liveness: bool = False,
+        max_faces: int | None = None,
+    ) -> list[DetectedFaceProbe]:
+        """Detect all faces in a probe image and return per-face liveness and encodings."""
+        rgb_image = self.load_rgb_from_bytes(image_bytes)
         face_locations = face_recognition.face_locations(rgb_image)
         if not face_locations:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No face detected in image.",
             )
-        if require_single_face and len(face_locations) != 1:
+
+        if max_faces is not None and len(face_locations) > max_faces:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Image must contain exactly one face.",
+                detail=f"Too many faces detected in one frame. Maximum allowed is {max_faces}.",
             )
 
-        locations_to_use = [face_locations[0]] if require_single_face else face_locations
         encodings = face_recognition.face_encodings(
             rgb_image,
-            known_face_locations=locations_to_use,
+            known_face_locations=face_locations,
         )
-        if not encodings:
+        if len(encodings) != len(face_locations):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unable to compute a face encoding from the image.",
+                detail="Unable to compute encodings for all detected faces.",
             )
 
-        return np.asarray(encodings[0], dtype=np.float64), liveness
+        probes: list[DetectedFaceProbe] = []
+        for index, location in enumerate(face_locations):
+            if enforce_liveness:
+                liveness = self._check_liveness_for_location(rgb_image, location)
+            else:
+                liveness = LivenessResult(
+                    label="Bypassed",
+                    score=1.0,
+                    reason="not_requested",
+                )
+
+            error_code = None
+            encoding = np.asarray(encodings[index], dtype=np.float64)
+            if enforce_liveness and not self.liveness_passed(liveness):
+                error_code = "spoof_detected"
+                encoding = None
+
+            probes.append(
+                DetectedFaceProbe(
+                    index=index,
+                    location=location,
+                    liveness=liveness,
+                    encoding=encoding,
+                    error_code=error_code,
+                )
+            )
+
+        return probes
 
     def compare_encodings(
         self,

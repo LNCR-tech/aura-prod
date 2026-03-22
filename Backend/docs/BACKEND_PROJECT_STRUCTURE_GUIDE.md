@@ -108,6 +108,7 @@ Backend/app/
 4. Smoke-test:
    - `POST /login`
    - `POST /auth/mfa/verify`
+   - `POST /api/admin/import-students/preview`
    - `POST /api/admin/import-students`
    - `POST /attendance/manual`
    - `GET /departments`

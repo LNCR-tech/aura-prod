@@ -6,7 +6,18 @@ Role: Test layer. It protects the app from regressions.
 import json
 from datetime import datetime, timedelta
 
-from app.models import Event, School, SchoolAuditLog, SchoolSetting, User, Role, UserRole
+from app.models import (
+    Department,
+    Event,
+    Program,
+    Role,
+    School,
+    SchoolAuditLog,
+    SchoolSetting,
+    StudentProfile,
+    User,
+    UserRole,
+)
 from app.core.security import create_access_token, verify_password
 from app.utils.passwords import hash_password_bcrypt
 
@@ -701,6 +712,57 @@ def test_create_user_api_does_not_force_password_change_for_new_accounts(client,
     assert created_user.must_change_password is False
     assert created_user.should_prompt_password_change is True
     assert verify_password(payload["generated_temporary_password"], created_user.password_hash)
+
+
+def test_get_all_users_returns_paged_student_profiles(client, test_db):
+    school = _create_school(test_db, code="USER-LIST")
+    admin_user = _create_user_with_role(
+        test_db,
+        email="paged.admin@example.com",
+        role_name="admin",
+        password="AdminPass123!",
+        school_id=school.id,
+    )
+    student_user = _create_user_with_role(
+        test_db,
+        email="paged.student@example.com",
+        role_name="student",
+        password="StudentPass123!",
+        school_id=school.id,
+    )
+
+    department = Department(school_id=school.id, name="School of Computing")
+    program = Program(school_id=school.id, name="BSIT")
+    department.programs.append(program)
+    test_db.add_all([department, program])
+    test_db.commit()
+
+    test_db.add(
+        StudentProfile(
+            user_id=student_user.id,
+            school_id=school.id,
+            student_id="BSIT-2026-001",
+            department_id=department.id,
+            program_id=program.id,
+            year_level=3,
+        )
+    )
+    test_db.commit()
+
+    response = client.get(
+        "/users/?skip=0&limit=2",
+        headers=_auth_headers(admin_user),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    listed_student = next(user for user in payload if user["id"] == student_user.id)
+
+    assert any(role["role"]["name"] == "student" for role in listed_student["roles"])
+    assert listed_student["student_profile"]["student_id"] == "BSIT-2026-001"
+    assert listed_student["student_profile"]["department_id"] == department.id
+    assert listed_student["student_profile"]["program_id"] == program.id
+    assert listed_student["student_profile"]["year_level"] == 3
 
 
 def test_change_password_accepts_current_password_for_model_hashed_user(client, test_db):

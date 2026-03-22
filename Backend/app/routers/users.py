@@ -43,7 +43,7 @@ from app.services.password_change_policy import (
 )
 from app.utils.passwords import generate_secure_password
 from app.core.dependencies import get_db
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from app.models.associations import program_department_association
 from app.services import governance_hierarchy_service
 
@@ -113,7 +113,7 @@ def _assert_school_it_assignable_roles(current_user: UserModel, role_names: List
 
 def _query_user_in_school(db: Session, user_id: int, school_id: int) -> UserModel | None:
     return (
-        db.query(UserModel)
+        _with_user_relations(db.query(UserModel))
         .filter(UserModel.id == user_id, UserModel.school_id == school_id)
         .first()
     )
@@ -144,10 +144,17 @@ def _apply_user_scope(query, actor: UserModel):
     return query.filter(UserModel.school_id == actor_school_id)
 
 
+def _with_user_relations(query):
+    return query.options(
+        selectinload(UserModel.roles).joinedload(UserRole.role),
+        joinedload(UserModel.student_profile),
+    )
+
+
 def _query_user_for_actor(db: Session, user_id: int, actor: UserModel) -> UserModel | None:
     actor_school_id = _actor_school_scope_id(actor)
     if actor_school_id is None:
-        return db.query(UserModel).filter(UserModel.id == user_id).first()
+        return _with_user_relations(db.query(UserModel)).filter(UserModel.id == user_id).first()
     return _query_user_in_school(db, user_id, actor_school_id)
 
 
@@ -260,12 +267,7 @@ def create_user(
 
         db.commit()
         db.refresh(db_user)
-        db_user = (
-            db.query(UserModel)
-            .options(joinedload(UserModel.roles).joinedload(UserRole.role))
-            .filter(UserModel.id == db_user.id)
-            .first()
-        )
+        db_user = _with_user_relations(db.query(UserModel)).filter(UserModel.id == db_user.id).first()
 
         school = db.query(School).filter(School.id == school_id).first()
         system_name = None
@@ -377,10 +379,13 @@ def get_all_users(
     Returns:
         List of users with all related data
     """
+    safe_skip = max(skip, 0)
+    safe_limit = max(1, min(limit, 500))
+
     # Get users with eager loading of relationships
-    query = db.query(UserModel)
+    query = _with_user_relations(db.query(UserModel))
     query = _apply_user_scope(query, current_user)
-    users = query.offset(skip).limit(limit).all()
+    users = query.order_by(UserModel.id.asc()).offset(safe_skip).limit(safe_limit).all()
     return _serialize_users(users)
 
 
@@ -405,16 +410,19 @@ def get_users_by_role(
     Returns:
         List of users with the specified role
     """
+    safe_skip = max(skip, 0)
+    safe_limit = max(1, min(limit, 500))
+
     # Find all users with the specified role
     query = (
-        db.query(UserModel)
+        _with_user_relations(db.query(UserModel))
         .join(UserRole)
         .join(Role)
         .filter(Role.name.in_(get_role_lookup_names(role_name)))
     )
     query = _apply_user_scope(query, current_user)
-    users = query.offset(skip).limit(limit).all()
-    
+    users = query.order_by(UserModel.id.asc()).offset(safe_skip).limit(safe_limit).all()
+
     return _serialize_users(users)
 
 @router.get("/me/", response_model=UserWithRelations)

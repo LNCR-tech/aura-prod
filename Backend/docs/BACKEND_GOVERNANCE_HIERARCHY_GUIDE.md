@@ -387,9 +387,41 @@ Rules:
 
 Lists visible governance units inside the actor's school scope.
 
+Response includes:
+
+- lightweight unit summary fields
+- `member_count` for active members in that unit
+
+Notes:
+
+- this route is intended for fast list screens such as `Manage SG` and `Manage ORG`
+- it does not return the full member roster or unit permission objects
+- use `GET /api/governance/units/{governance_unit_id}` when the frontend needs one selected unit's full detail
+
 ### `GET /api/governance/units/{governance_unit_id}`
 
 Returns full unit details, including members and granted permissions.
+
+### `GET /api/governance/units/{governance_unit_id}/dashboard-overview`
+
+Returns the lightweight data used by the `SSG`, `SG`, and `ORG` dashboard cards.
+
+Response includes:
+
+- `published_announcement_count`
+- `total_students`
+- `recent_announcements`
+  - only the latest dashboard items, not the whole history
+- `child_units`
+  - lightweight summaries with `member_count`
+
+Rules:
+
+- visible to actors who can already view that governance unit
+- preserves the current dashboard permission behavior:
+  - announcement data stays empty unless the actor can manage announcements in that unit
+  - student totals stay `0` unless the actor can view or manage students in that unit
+- avoids the old N+1 dashboard flow where the frontend fetched full child-unit details one by one and loaded the whole student list just to compute totals
 
 ### `GET /api/governance/units/{governance_unit_id}/event-defaults`
 
@@ -557,6 +589,14 @@ Query params:
   - optional
   - `SSG`, `SG`, or `ORG`
   - narrows the response to one governance layer when the current user has multiple memberships
+- `skip`
+  - optional
+  - defaults to `0`
+  - supports paginated student-directory pages such as `/ssg_students`, `/sg_students`, and `/org_students`
+- `limit`
+  - optional
+  - capped at `250`
+  - governance student pages now request `101` rows and render `100` per page so the UI can detect whether a next page exists
 
 Rules:
 
@@ -572,6 +612,7 @@ Frontend use:
 
 - `SSGDashboard` now uses this route for the student total card instead of the Campus Admin-only `/users/` API
 - `SsgStudents` now uses this route for the student directory so SSG officers no longer hit user-management permission errors
+- `SsgStudents`, `SgStudents`, and `OrgStudents` now page through this route in `100`-row slices instead of loading the full accessible directory at once
 
 ### `POST /api/governance/units/{governance_unit_id}/permissions`
 
@@ -637,6 +678,8 @@ Current `Manage SG` behavior:
   - `create_sg`
   - `manage_members`
   - `assign_permissions`
+- the SG unit grid loads from `GET /api/governance/units` and uses `member_count` instead of preloading full details for every SG unit
+- full SG member and permission data loads only when the user opens the selected unit's `Members` or `Permissions` tabs
 - `create_sg`
   - allows creating one department-wide `SG` per department
   - allows editing SG info
@@ -699,6 +742,8 @@ Frontend behavior:
   - `create_org`
   - `manage_members`
   - or `assign_permissions`
+- the ORG unit grid also loads from `GET /api/governance/units` and uses `member_count` instead of preloading full ORG details for every card
+- full ORG member and permission data loads only when the user opens the selected unit's `Members` or `Permissions` tabs
 
 ## Governance-Scoped Events and Attendance
 
@@ -773,10 +818,19 @@ Campus Admin user management is now intentionally student-focused.
 Current behavior:
 
 - `Manage Users` can still edit basic student account details and academic fields
+- `Manage Users` now walks every `/users/` page, so large imports do not disappear after the first 100 default results
+- `Manage Users` now keeps the first page lighter by loading department and program option lists only when the edit modal opens
 - Campus Admin can no longer promote users to `ssg` or `event-organizer` through `/users`
 - Campus Admin can no longer update roles through `/users/{user_id}/roles`
 - imported users stay students first
 - SSG officer access must be assigned from `Manage SSG`
+
+Backend pagination details:
+
+- `GET /users/` now returns results in ascending `user.id` order before `skip` and `limit` are applied
+- `GET /users/by-role/{role_name}` now uses the same stable ordering
+- both user list routes now eager-load `roles.role` and `student_profile` before response serialization so `Manage Users` avoids one-query-per-row relation loading
+- each request is capped at `500` rows, so frontend callers should continue paging for larger schools
 
 This keeps governance elevation inside one workflow instead of splitting it across `Manage Users`, import logic, and the SSG setup screen.
 
@@ -831,6 +885,7 @@ The service method `get_accessible_students()` applies these rules:
    - try creating a second `SSG` through the generic units route and confirm the backend blocks it
 5. Verify Campus Admin user-management lock:
    - open `Manage Users` as `campus_admin`
+   - confirm more than 100 imported student accounts still load in the roster for a large school
    - confirm role editing is hidden for Campus Admin
    - confirm officer assignments are described as a `Manage SSG` action instead
    - call `PUT /users/{user_id}/roles` as Campus Admin and confirm it returns `403`
@@ -842,6 +897,7 @@ The service method `get_accessible_students()` applies these rules:
 7. Verify `Manage SG`:
    - log in as an `ssg` user with `create_sg`, `manage_members`, and `assign_permissions`
    - open `/ssg_manage_sg`
+   - confirm the first screen loads from `GET /api/governance/units` without one follow-up detail request per SG card
    - create a department SG and confirm departments already used by another SG cannot be selected again
    - edit the SG name or description
    - search imported students and confirm only students from that department appear
@@ -853,8 +909,12 @@ The service method `get_accessible_students()` applies these rules:
 8. Verify governance-scoped student access:
    - log in as an `SSG` officer with `view_students` or `manage_students`
    - open `/ssg_dashboard` and confirm the page no longer raises `Requires admin or Campus Admin role`
+   - confirm the dashboard loads through `GET /api/governance/units/{governance_unit_id}/dashboard-overview`
+   - confirm the dashboard student total appears without fetching the full student list first
    - open `/ssg_students` and confirm the list loads from `/api/governance/students`
    - confirm the returned students match the officer's governance scope
+   - import or create more than `100` students and confirm `/ssg_students` shows `Previous` and `Next` pagination controls
+   - move to the next page and confirm the page requests the next `100` students instead of reloading the full campus directory
 9. Verify SG and ORG workspaces:
    - log in as an SG officer with:
      - `manage_events`
@@ -862,17 +922,20 @@ The service method `get_accessible_students()` applies these rules:
      - `manage_announcements`
      - `view_students` or `manage_students`
      - `create_org`, `manage_members`, and `assign_permissions`
-   - confirm these routes load:
-     - `/sg_dashboard`
-     - `/sg_announcements`
-     - `/sg_students`
-     - `/sg_events`
-     - `/sg_records`
-     - `/sg_manual_attendance`
-     - `/sg_manage_org`
-   - confirm SG event pages only show department-scoped events
+    - confirm these routes load:
+      - `/sg_dashboard`
+      - `/sg_announcements`
+      - `/sg_students`
+      - `/sg_events`
+      - `/sg_records`
+      - `/sg_manual_attendance`
+      - `/sg_manage_org`
+    - confirm `/sg_dashboard` loads from the dashboard overview route and no longer makes one child-unit detail request per ORG card
+    - confirm `/sg_manage_org` first loads from `GET /api/governance/units` and does not preload full detail for every ORG card
+    - confirm SG event pages only show department-scoped events
    - call `POST /events/` without `governance_context` and confirm the backend still forces the created event to the SG department scope
    - confirm SG attendance pages reject students outside the SG department
+   - import or create more than `100` in-scope SG students and confirm `/sg_students` paginates through the directory in `100`-row pages
    - log in as an ORG officer with matching permissions
    - confirm these routes load:
      - `/org_dashboard`
@@ -881,11 +944,13 @@ The service method `get_accessible_students()` applies these rules:
      - `/org_events`
      - `/org_records`
      - `/org_manual_attendance`
+    - confirm `/org_dashboard` loads from the dashboard overview route and still shows the same officer list and announcement summary behavior
    - confirm ORG event pages only show program-scoped events
    - call `POST /events/` without `governance_context` and confirm the backend still forces the created event to the ORG department + program scope
    - save SG or ORG event defaults from the Events settings panel and confirm the next newly created event uses those values automatically
    - reset the override to inherit school defaults and confirm the next newly created event returns to the school values
    - confirm ORG student pages only show students in the ORG program
+   - import or create more than `100` in-scope ORG students and confirm `/org_students` paginates through the directory in `100`-row pages
    - remove and re-add an ORG officer from `Manage ORG` and confirm the reassignment succeeds without a server error
    - try updating an out-of-scope event without `governance_context` and confirm the backend returns `404 Event not found`
 10. Verify persisted announcements and notes:

@@ -36,10 +36,11 @@ jobs:
   # ===========================================================================
   # Deploy to production server
   # Required GitHub secrets:
-  #   PROD_SSH_HOST  — server IP or hostname
-  #   PROD_SSH_USER  — SSH login user (e.g. ubuntu, deploy)
-  #   PROD_SSH_KEY   — private SSH key (PEM format)
-  #   PROD_APP_DIR   — absolute path on server (e.g. /opt/aura)
+  #   SERVER_HOST    — server IP or hostname
+  #   SERVER_PORT    — SSH port (e.g. 22)
+  #   SERVER_USER    — SSH login user (e.g. ubuntu)
+  #   SERVER_SSH_KEY — private SSH key (PEM format)
+  #   SERVER_APP_DIR — absolute path on server (e.g. /opt/aura)
   # ===========================================================================
 
   deploy:
@@ -50,12 +51,13 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.PROD_SSH_HOST }}
-          username: ${{ secrets.PROD_SSH_USER }}
-          key: ${{ secrets.PROD_SSH_KEY }}
+          host: ${{ secrets.SERVER_HOST }}
+          port: ${{ secrets.SERVER_PORT }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             set -e
-            cd ${{ secrets.PROD_APP_DIR }}
+            cd ${{ secrets.SERVER_APP_DIR }}
             git fetch origin main
             git reset --hard origin/main
             docker compose -f docker-compose.prod.yml build --pull

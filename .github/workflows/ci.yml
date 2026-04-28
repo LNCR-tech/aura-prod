@@ -187,8 +187,23 @@ jobs:
           script: |
             set -e
             cd ${{ secrets.PROD_APP_DIR }}
+            # Back up existing .env files before reset
+            for svc in backend frontend assistant database; do
+              if [ -f "$svc/.env" ]; then
+                cp "$svc/.env" "/tmp/${svc}_env_backup"
+              fi
+            done
             git fetch origin main
             git reset --hard origin/main
+            # Restore .env files (or create from .env.example)
+            for svc in backend frontend assistant database; do
+              if [ -f "/tmp/${svc}_env_backup" ]; then
+                cp "/tmp/${svc}_env_backup" "$svc/.env"
+                rm "/tmp/${svc}_env_backup"
+              elif [ -f "$svc/.env.example" ]; then
+                cp "$svc/.env.example" "$svc/.env"
+              fi
+            done
             docker compose -f docker-compose.prod.yml build --pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f

@@ -15,10 +15,11 @@ from app.core.security import get_current_admin_or_campus_admin
 from app.core.dependencies import get_db
 from app.models.user import User
 from app.reports.system import router as system_reports_router
+from app.schemas.common import PaginatedResponse
 router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"])
 
 
-@router.get("")
+@router.get("", response_model=PaginatedResponse)
 def search_audit_logs(
     q: Optional[str] = Query(default=None, max_length=200),
     action: Optional[str] = Query(default=None, max_length=100),
@@ -26,8 +27,8 @@ def search_audit_logs(
     actor_user_id: Optional[int] = Query(default=None),
     start_date: Optional[datetime] = Query(default=None),
     end_date: Optional[datetime] = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
     current_user: User = Depends(get_current_admin_or_campus_admin),
     db: Session = Depends(get_db),
 ):
@@ -40,12 +41,26 @@ def search_audit_logs(
         actor_user_id=actor_user_id,
         start_date=start_date,
         end_date=end_date,
-        limit=limit,
-        offset=offset,
+        limit=None,
+        offset=0,
     )
+    items = []
     if isinstance(result, dict) and "items" in result:
-        return result["items"]
-    if hasattr(result, "items"):
-        return result.items
-    return result
+        items = result["items"]
+    elif hasattr(result, "items"):
+        items = result.items
+    elif isinstance(result, list):
+        items = result
+
+    total = len(items)
+    skip = (page - 1) * page_size
+    paginated_items = items[skip : skip + page_size]
+    total_pages = (total + page_size - 1) // page_size
+    return PaginatedResponse(
+        items=paginated_items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 

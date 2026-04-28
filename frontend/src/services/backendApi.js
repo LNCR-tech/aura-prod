@@ -503,13 +503,16 @@ export async function updateSchoolBranding(baseUrl, token, payload = {}, logoFil
 }
 
 export async function getEvents(baseUrl, token, params = {}, requestOptions = {}) {
+    const { limit, ...rest } = params
+    const resolvedParams = { ...rest, ...(limit != null ? { page_size: limit } : {}) }
     const payload = await requestWithFallback(baseUrl, ['/api/events/', '/events/'], {
         method: 'GET',
         token,
-        params,
+        params: resolvedParams,
         ...requestOptions,
     }, [404, 405])
-    return Array.isArray(payload) ? payload.map(normalizeEvent) : []
+    const items = Array.isArray(payload?.items) ? payload.items : (Array.isArray(payload) ? payload : [])
+    return items.map(normalizeEvent)
 }
 
 export async function getEventById(baseUrl, token, eventId) {
@@ -871,31 +874,39 @@ export async function resetAdminSchoolItPassword(baseUrl, token, userId) {
 }
 
 export async function getAuditLogs(baseUrl, token, params = {}) {
+    const { limit, ...rest } = params
+    const resolvedParams = { ...rest, ...(limit != null ? { page_size: limit } : {}) }
     return normalizeAuditLogResponse(await request(baseUrl, '/api/audit-logs', {
         method: 'GET',
         token,
-        params,
+        params: resolvedParams,
     }))
 }
 
 export async function getNotificationLogs(baseUrl, token, params = {}) {
+    const { limit, ...rest } = params
+    const resolvedParams = { ...rest, ...(limit != null ? { page_size: limit } : {}) }
     const payload = await request(baseUrl, '/api/notifications/logs', {
         method: 'GET',
         token,
-        params,
+        params: resolvedParams,
     })
 
-    return Array.isArray(payload) ? payload.map(normalizeNotificationLogItem).filter(Boolean) : []
+    const items = Array.isArray(payload?.items) ? payload.items : (Array.isArray(payload) ? payload : [])
+    return items.map(normalizeNotificationLogItem).filter(Boolean)
 }
 
 export async function getMyNotificationInbox(baseUrl, token, params = {}) {
+    const { limit, ...rest } = params
+    const resolvedParams = { ...rest, ...(limit != null ? { page_size: limit } : {}) }
     const payload = await request(baseUrl, '/api/notifications/inbox/me', {
         method: 'GET',
         token,
-        params,
+        params: resolvedParams,
     })
 
-    return Array.isArray(payload) ? payload.map(normalizeNotificationLogItem).filter(Boolean) : []
+    const items = Array.isArray(payload?.items) ? payload.items : (Array.isArray(payload) ? payload : [])
+    return items.map(normalizeNotificationLogItem).filter(Boolean)
 }
 
 export async function dispatchMissedEventNotifications(baseUrl, token, params = {}) {
@@ -935,13 +946,16 @@ export async function updateGovernanceSettings(baseUrl, token, payload, params =
 }
 
 export async function getGovernanceRequests(baseUrl, token, params = {}) {
+    const { limit, ...rest } = params
+    const resolvedParams = { ...rest, ...(limit != null ? { page_size: limit } : {}) }
     const payload = await request(baseUrl, '/api/governance/requests', {
         method: 'GET',
         token,
-        params,
+        params: resolvedParams,
     })
 
-    return Array.isArray(payload) ? payload.map(normalizeGovernanceRequest).filter(Boolean) : []
+    const items = Array.isArray(payload?.items) ? payload.items : (Array.isArray(payload) ? payload : [])
+    return items.map(normalizeGovernanceRequest).filter(Boolean)
 }
 
 export async function updateGovernanceRequest(baseUrl, token, requestId, payload) {
@@ -1250,6 +1264,8 @@ function normalizeAttendanceCollectionPayload(payload = null) {
 }
 
 export async function getMyAttendance(baseUrl, token, params = {}, requestOptions = {}) {
+    const { limit, ...rest } = params
+    const resolvedParams = { ...rest, ...(limit != null ? { page_size: limit } : {}) }
     const payload = await requestWithFallback(baseUrl, [
         '/api/attendance/me/records',
         '/attendance/me/records',
@@ -1258,10 +1274,11 @@ export async function getMyAttendance(baseUrl, token, params = {}, requestOption
     ], {
         method: 'GET',
         token,
-        params,
+        params: resolvedParams,
         ...requestOptions,
     }, [404, 405])
-    return normalizeAttendanceCollectionPayload(payload)
+    const items = Array.isArray(payload?.items) ? payload.items : (Array.isArray(payload) ? payload : null)
+    return normalizeAttendanceCollectionPayload(items)
 }
 
 export async function getStudentAttendanceReport(baseUrl, token, studentProfileId, params = {}) {

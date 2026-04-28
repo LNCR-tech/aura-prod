@@ -15,6 +15,7 @@ from app.core.security import (
 )
 from app.core.dependencies import get_db
 from app.models.notifications import NotificationLog
+from app.schemas.common import PaginatedResponse
 from app.reports.system import router as system_reports_router
 from app.models.user import User
 from app.schemas.notification import (
@@ -87,37 +88,63 @@ def update_my_notification_preferences(
     return pref
 
 
-@router.get("/logs", response_model=list[NotificationLogItem])
+@router.get("/logs", response_model=PaginatedResponse)
 def list_notification_logs(
     school_id: int | None = Query(default=None),
     category: str | None = Query(default=None),
     status_value: str | None = Query(default=None, alias="status"),
     user_id: int | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
     current_user: User = Depends(get_current_admin_or_campus_admin),
     db: Session = Depends(get_db),
 ):
-    return system_reports_router.list_notification_logs(
+    result = system_reports_router.list_notification_logs(
         db,
         current_user=current_user,
         school_id=school_id,
         category=category,
         status_value=status_value,
         user_id=user_id,
-        limit=limit,
+        limit=None,
+    )
+    items = result if isinstance(result, list) else (result.get("items", []) if isinstance(result, dict) else [])
+    total = len(items)
+    skip = (page - 1) * page_size
+    paginated_items = items[skip : skip + page_size]
+    total_pages = (total + page_size - 1) // page_size
+    return PaginatedResponse(
+        items=paginated_items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
     )
 
 
-@router.get("/inbox/me", response_model=list[NotificationLogItem])
+@router.get("/inbox/me", response_model=PaginatedResponse)
 def list_my_notification_inbox(
-    limit: int = Query(default=50, ge=1, le=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     current_user: User = Depends(get_current_application_user),
     db: Session = Depends(get_db),
 ):
-    return get_notification_inbox_for_user(
+    result = get_notification_inbox_for_user(
         db,
         user_id=current_user.id,
-        limit=limit,
+        limit=None,
+    )
+    items = result if isinstance(result, list) else (result.get("items", []) if isinstance(result, dict) else [])
+    total = len(items)
+    skip = (page - 1) * page_size
+    paginated_items = items[skip : skip + page_size]
+    total_pages = (total + page_size - 1) // page_size
+    return PaginatedResponse(
+        items=paginated_items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
     )
 
 

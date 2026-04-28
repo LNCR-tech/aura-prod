@@ -31,6 +31,7 @@ from app.models.platform_features import (
 from app.models.notifications import NotificationLog
 from app.models.school import SchoolAuditLog
 from app.models.user import User
+from app.schemas.common import PaginatedResponse
 from app.schemas.governance import (
     DataGovernanceSettingResponse,
     DataGovernanceSettingUpdate,
@@ -134,17 +135,24 @@ def create_my_privacy_consent(
     return consent
 
 
-@router.get("/consents/me", response_model=list[PrivacyConsentItem])
+@router.get("/consents/me", response_model=PaginatedResponse)
 def list_my_consents(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     current_user: User = Depends(get_current_application_user),
     db: Session = Depends(get_db),
 ):
-    return (
-        db.query(UserPrivacyConsent)
-        .filter(UserPrivacyConsent.user_id == current_user.id)
-        .order_by(UserPrivacyConsent.created_at.desc())
-        .limit(200)
-        .all()
+    query = db.query(UserPrivacyConsent).filter(UserPrivacyConsent.user_id == current_user.id).order_by(UserPrivacyConsent.created_at.desc())
+    total = query.count()
+    skip = (page - 1) * page_size
+    items = query.offset(skip).limit(page_size).all()
+    total_pages = (total + page_size - 1) // page_size
+    return PaginatedResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
     )
 
 
@@ -175,12 +183,13 @@ def create_data_request(
     return row
 
 
-@router.get("/requests", response_model=list[DataRequestItem])
+@router.get("/requests", response_model=PaginatedResponse)
 def list_data_requests(
     school_id: int | None = Query(default=None),
     status_value: str | None = Query(default=None, alias="status"),
     request_type: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
     current_user: User = Depends(get_current_application_user),
     db: Session = Depends(get_db),
 ):
@@ -205,7 +214,18 @@ def list_data_requests(
     if request_type:
         query = query.filter(DataRequest.request_type == request_type)
 
-    return query.order_by(DataRequest.created_at.desc()).limit(limit).all()
+    query = query.order_by(DataRequest.created_at.desc())
+    total = query.count()
+    skip = (page - 1) * page_size
+    items = query.offset(skip).limit(page_size).all()
+    total_pages = (total + page_size - 1) // page_size
+    return PaginatedResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 def _export_request_payload(db: Session, request_row: DataRequest) -> str:

@@ -1,0 +1,163 @@
+# =============================================================================
+# Aura — Production Compose
+# Usage:  docker compose -f docker-compose.prod.yml up --build -d
+# All .env files must be populated before starting.
+# =============================================================================
+
+x-backend-volumes: &backend-volumes
+  - import_storage:/app/storage/imports
+  - branding_storage:/app/storage/school_logos
+  - insightface_storage:/root/.insightface
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
+
+  postgres:
+    build:
+      context: ./database
+    image: aura-postgres:latest
+    restart: unless-stopped
+    env_file:
+      - ./database/.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Init jobs — run once in order, then exit
+  # ---------------------------------------------------------------------------
+
+  migrate:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    image: aura-backend:production
+    environment:
+      SERVICE_MODE: migrate
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  bootstrap:
+    image: aura-backend:production
+    command: python bootstrap.py
+    env_file:
+      - ./backend/.env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  seeder:
+    build:
+      context: ./seeder
+    image: aura-seeder:production
+    env_file:
+      - ./seeder/.env
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Application services
+  # ---------------------------------------------------------------------------
+
+  backend:
+    image: aura-backend:production
+    environment:
+      SERVICE_MODE: web
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    volumes: *backend-volumes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      bootstrap:
+        condition: service_completed_successfully
+
+  worker:
+    image: aura-backend:production
+    environment:
+      SERVICE_MODE: worker
+      CELERY_WORKER_POOL: prefork
+      CELERY_WORKER_CONCURRENCY: "4"
+    env_file:
+      - ./backend/.env
+    volumes: *backend-volumes
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  beat:
+    image: aura-backend:production
+    environment:
+      SERVICE_MODE: beat
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  assistant:
+    build:
+      context: ./assistant
+    image: aura-assistant:production
+    ports:
+      - "8500:8500"
+    env_file:
+      - ./assistant/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    image: aura-frontend:production
+    ports:
+      - "80:80"
+    env_file:
+      - ./frontend/.env
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  import_storage:
+  branding_storage:
+  insightface_storage:

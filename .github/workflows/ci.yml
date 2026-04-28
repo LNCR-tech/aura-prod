@@ -180,15 +180,16 @@ jobs:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
         with:
-          host: ${{ secrets.SERVER_HOST }}
+          host: ${{ secrets.PROD_SSH_HOST }}
           port: ${{ secrets.SERVER_PORT }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
           script: |
             set -e
-            cd ${{ secrets.SERVER_APP_DIR }}
+            cd ${{ secrets.PROD_APP_DIR }}
             git fetch origin main
             git reset --hard origin/main
             docker compose -f docker-compose.prod.yml build --pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
+

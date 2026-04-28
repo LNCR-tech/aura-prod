@@ -232,11 +232,16 @@ def verify_event_geolocation_for_attendance(
         attendance_decision=build_event_attendance_decision_info(event),
     )
     if not geo_result.ok:
+        distance_m = geo_result.distance_m
+        radius_m = geo_result.radius_m
+        user_message = f"You are {distance_m:.0f} meters from the event location (allowed: {radius_m:.0f} meters)."
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=build_event_geolocation_error_detail(
-                code="event_geolocation_verification_failed",
-                message="The current location is not valid for this event attendance scan.",
+                code="OUTSIDE_GEOFENCE",
+                message=user_message,
+                distance_m=distance_m,
+                radius_m=radius_m,
                 response=response,
             ),
         )

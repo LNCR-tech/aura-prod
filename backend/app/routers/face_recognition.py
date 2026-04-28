@@ -421,8 +421,11 @@ def record_attendance_from_face_scan(
             normalized_error = resolve_face_verification_error_message(exc.detail)
             if normalized_error is None:
                 raise
-            status_code, message = normalized_error
-            raise HTTPException(status_code=status_code, detail=message) from exc
+            status_code, message, error_code = normalized_error
+            raise HTTPException(
+                status_code=status_code,
+                detail={"code": error_code, "message": message},
+            ) from exc
         try:
             reference_encoding = face_service.encoding_from_bytes(
                 bytes(current_student_profile.face_encoding),

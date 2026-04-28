@@ -28,6 +28,7 @@ from app.schemas.attendance import (
     StudentAttendanceSummary,
     StudentListItem,
 )
+from app.schemas.common import PaginatedResponse
 from app.schemas.attendance_requests import (
     AttendanceActionResponse,
     BulkAttendanceRequest,

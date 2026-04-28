@@ -7,11 +7,11 @@ from .shared import *  # noqa: F403
 router = APIRouter()
 
 
-@router.get("/students/me", response_model=List[Attendance])
+@router.get("/students/me", response_model=PaginatedResponse)
 def get_my_attendance(
     event_id: Optional[int] = None,
-    skip: int = 0,
-    limit: int = 100,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -30,8 +30,18 @@ def get_my_attendance(
     if event_id:
         query = query.filter(AttendanceModel.event_id == event_id)
 
-    attendances = query.order_by(AttendanceModel.time_in.desc()).offset(skip).limit(limit).all()
-    return [_serialize_attendance_model(attendance) for attendance in attendances]
+    total = query.count()
+    total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+    skip = (page - 1) * page_size
+    attendances = query.order_by(AttendanceModel.time_in.desc()).offset(skip).limit(page_size).all()
+
+    return PaginatedResponse(
+        items=[_serialize_attendance_model(a) for a in attendances],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 @router.post("/face-scan", response_model=AttendanceActionResponse)

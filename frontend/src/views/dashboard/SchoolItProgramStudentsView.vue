@@ -315,8 +315,7 @@
 
             <p class="school-it-program-students__sheet-note">
               The backend creates the student account, links the student to this college and program,
-              and sets the student's lowercase last name as the default first-login password.
-              No email is sent &mdash; please tell the student their default password.
+              generates a temporary password, and sends that password through the welcome email.
             </p>
 
             <p
@@ -1294,7 +1293,7 @@ async function handleAddStudent() {
     let createdStudent = null
     let studentIdSaveError = null
 
-    sheetMessage.value = 'Creating student account...'
+    sheetMessage.value = 'Creating student account and sending welcome email...'
     createdUser = await createStudentAccount(apiBaseUrl.value, token, {
       email: draft.email,
       first_name: draft.firstName,
@@ -1348,24 +1347,23 @@ async function finalizeCreatedStudentCreation(creationOutcome, draft) {
   const studentIdFollowUpMessage = studentIdSaveError
     ? `${resolveStudentUpdateError(studentIdSaveError)} You can finish the student ID from Edit Student without recreating the account.`
     : ''
-  const defaultPasswordHint = `Default password: ${String(draft.lastName || '').trim().toLowerCase()} (lowercase last name).`
-  const passwordStatus = studentIdFollowUpMessage
-    ? `The backend created the account. ${defaultPasswordHint} The requested student ID still needs follow-up. ${studentIdFollowUpMessage}`
-    : `The backend created the account. ${defaultPasswordHint} No email is sent &mdash; please share this with the student.`
+  const emailStatus = studentIdFollowUpMessage
+    ? `The backend created the account and sent the temporary password by welcome email, but the requested student ID still needs follow-up. ${studentIdFollowUpMessage}`
+    : 'The backend created the account and sent the generated temporary password to the student email address.'
 
   applyCreatedStudent(resolvedCreatedStudent)
   refreshSchoolItWorkspaceData().catch(() => {})
   feedbackTone.value = 'info'
   feedbackMessage.value = `${draft.firstName} ${draft.lastName} was added to ${selectedProgram.value.name}.`
-  feedbackDetail.value = studentIdFollowUpMessage || defaultPasswordHint
+  feedbackDetail.value = studentIdFollowUpMessage || 'The temporary password was delivered through the welcome email.'
   createdStudentSummary.value = {
     fullName: `${draft.firstName} ${draft.lastName}`.trim(),
     studentIdValue,
     email: draft.email,
     departmentName: selectedDepartment.value.name,
     programName: selectedProgram.value.name,
-    deliveryValue: defaultPasswordHint,
-    emailStatus: passwordStatus,
+    deliveryValue: 'Temporary password sent by email',
+    emailStatus,
   }
 }
 
@@ -1527,11 +1525,11 @@ function resolveStudentCreationError(error) {
   }
 
   if (error.status === 422) {
-    return 'Some student fields are invalid. Please check the email, last name, student ID, and year level.'
+    return 'Some student fields are invalid. Please check the email, student ID, and year level.'
   }
 
   if (error.status === 502) {
-    return error.message || 'The backend could not create the student account right now. Please try again.'
+    return error.message || 'The backend could not deliver the welcome email, so the student account was not created.'
   }
 
   return error.message || 'Unable to add this student right now.'

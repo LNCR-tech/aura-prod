@@ -40,8 +40,9 @@ def create_student_account(
 
     student_role = _get_or_create_role_by_name(db, "student")
 
-    # Use lowercase last name as password (same as bulk import)
-    issued_password = student.last_name.strip().lower() if student.last_name and student.last_name.strip() else "password"
+    # Default password = lowercase last name (same as bulk import).
+    # StudentAccountCreate validates last_name is non-empty after stripping.
+    issued_password = student.last_name.strip().lower()
 
     try:
         db_user = UserModel(

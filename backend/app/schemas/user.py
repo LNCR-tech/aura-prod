@@ -119,6 +119,22 @@ class StudentAccountCreate(UserBase):
         """Normalize and validate the campus-admin student ID when provided."""
         return _normalize_student_id_or_raise(value)
 
+    @field_validator("last_name")
+    @classmethod
+    def validate_last_name_present(cls, value: str) -> str:
+        # Last name doubles as the student's default first-login password,
+        # so it must be present after stripping whitespace.
+        if not value or not value.strip():
+            raise ValueError("Last name is required and is used as the default password")
+        return value.strip()
+
+    @field_validator("first_name")
+    @classmethod
+    def validate_first_name_present(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("First name is required")
+        return value.strip()
+
 
 class UserUpdate(BaseModel):
     """Schema for partially updating user information."""

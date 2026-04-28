@@ -62,16 +62,6 @@ services:
         condition: service_completed_successfully
     restart: "no"
 
-  seeder:
-    build:
-      context: ./seeder
-    image: aura-seeder:production
-    env_file:
-      - ./seeder/.env
-    depends_on:
-      bootstrap:
-        condition: service_completed_successfully
-    restart: "no"
 
   # ---------------------------------------------------------------------------
   # Application services

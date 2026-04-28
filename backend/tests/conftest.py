@@ -34,7 +34,7 @@ from app.utils.passwords import hash_password_bcrypt
 def run_migrations():
     alembic_cfg = Config("alembic.ini")
     alembic_cfg.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
-    command.upgrade(alembic_cfg, "head")
+    command.upgrade(alembic_cfg, "heads")
     yield
 
 

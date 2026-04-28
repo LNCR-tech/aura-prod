@@ -37,7 +37,7 @@
       </div>
     </section>
 
-    <section v-else-if="isDesktop" class="desktop-notice-screen">
+    <section v-else-if="false" class="desktop-notice-screen">
       <div class="desktop-notice-card">
         <p class="desktop-notice-eyebrow">Mobile only for now</p>
         <h1 class="desktop-notice-title">Please use mobile to continue.</h1>

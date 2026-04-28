@@ -2,8 +2,6 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
-from alembic.config import Config
-from alembic import command
 
 os.environ.setdefault("DATABASE_URL", "postgresql://postgres:cmpjdatabase@127.0.0.1:5432/fastapi_db")
 os.environ.setdefault("SECRET_KEY", "test-secret-key")
@@ -27,19 +25,11 @@ from app.utils.passwords import hash_password_bcrypt
 
 
 # ---------------------------------------------------------------------------
-# DB session — migrate once, seed once, clean up at end of session
+# DB session — seed once, commit, clean up at end of session
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session", autouse=True)
-def run_migrations():
-    alembic_cfg = Config("alembic.ini")
-    alembic_cfg.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
-    command.upgrade(alembic_cfg, "heads")
-    yield
-
-
 @pytest.fixture(scope="session")
-def db_session(run_migrations):
+def db_session():
     db = SessionLocal()
     _seed(db)
     yield db

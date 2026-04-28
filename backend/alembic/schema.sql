@@ -1,4 +1,4 @@
-﻿-- aura_v4_normalized.sql
+-- aura_v4_normalized.sql
 -- Purpose: Target normalized schema for Aura (PostgreSQL).
 -- Notes:
 -- 1) This is a forward-looking design in db_normalized/ playground.

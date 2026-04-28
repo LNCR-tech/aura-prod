@@ -34,6 +34,7 @@ from app.schemas.event import (
 )
 from app.schemas.attendance import Attendance
 from app.schemas.attendance_requests import EventAttendanceStatsResponse
+from app.schemas.common import PaginatedResponse
 from app.services import governance_hierarchy_service
 from app.services.event_attendance_service import finalize_completed_event_attendance
 from app.services.event_geolocation import (

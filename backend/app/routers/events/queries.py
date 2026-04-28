@@ -5,10 +5,10 @@ from .shared import *  # noqa: F403
 router = APIRouter()
 
 
-@router.get("/", response_model=list[EventSchema])
+@router.get("/", response_model=PaginatedResponse)
 def read_events(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     status: Optional[EventStatus] = None,
     start_from: Optional[datetime] = None,
     end_at: Optional[datetime] = None,
@@ -39,13 +39,25 @@ def read_events(
         governance_context=governance_context,
         events=events,
     )
-    return events[skip : skip + limit]
+
+    total = len(events)
+    total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+    skip = (page - 1) * page_size
+    paginated_items = events[skip : skip + page_size]
+
+    return PaginatedResponse(
+        items=paginated_items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
-@router.get("/ongoing", response_model=list[EventSchema])
+@router.get("/ongoing", response_model=PaginatedResponse)
 def get_ongoing_events(
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     governance_context: GovernanceUnitType | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user: UserModel = Depends(get_current_user),
@@ -70,7 +82,19 @@ def get_ongoing_events(
         governance_context=governance_context,
         events=events,
     )
-    return events[skip : skip + limit]
+
+    total = len(events)
+    total_pages = (total + page_size - 1) // page_size if total > 0 else 1
+    skip = (page - 1) * page_size
+    paginated_items = events[skip : skip + page_size]
+
+    return PaginatedResponse(
+        items=paginated_items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=total_pages,
+    )
 
 
 @router.get("/{event_id}", response_model=EventWithRelations)

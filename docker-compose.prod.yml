@@ -5,9 +5,9 @@
 # =============================================================================
 
 x-backend-volumes: &backend-volumes
-  - import_storage:/app/storage/imports
-  - branding_storage:/app/storage/school_logos
-  - insightface_storage:/root/.insightface
+  - ./docker-data/imports:/app/storage/imports
+  - ./docker-data/branding:/app/storage/school_logos
+  - ./docker-data/insightface:/root/.insightface
 
 services:
 
@@ -23,7 +23,7 @@ services:
     env_file:
       - ./database/.env
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./docker-data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
@@ -146,8 +146,3 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-volumes:
-  postgres_data:
-  import_storage:
-  branding_storage:
-  insightface_storage:

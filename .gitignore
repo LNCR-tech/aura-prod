@@ -1,0 +1,60 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.amazonq/
+.kilo/
+.claude/
+.scratch/
+q-dev-chat-*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+
+# Node / frontend builds
+node_modules/
+frontend-web/node_modules/
+frontend-web/dist/
+frontend-web/dist-ssr/
+frontend-web/.vite/
+frontend-web/.pnp.*
+frontend-web/.yarn/
+frontend-web/.env.docker
+frontend-web/.env.docker.*
+!frontend-web/.env.example
+
+# Logs
+*.log
+logs/
+
+# Environment / secrets
+.env
+.env.local
+.env.development.local
+.env.backup.*
+*.env
+
+# Database / local artifacts
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+docker-data/
+backend/storage/
+storage/
+seeder/storage/seeder_outputs/
+
+# Project-specific generated files
+backend/face_encodings.pkl
+backend/.alembic.ini.swp
+backend/.venv/
+GITHUB/
+
+# SSH keys
+*.pem

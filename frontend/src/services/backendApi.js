@@ -196,6 +196,7 @@ function shouldRetryWithApiProxyPrefix(path, error) {
     return (
         typeof path === 'string'
         && path.startsWith('/api/')
+        && path !== '/api/token'
         && !path.startsWith('/api/api/')
         && error instanceof BackendApiError
         && (

@@ -9,7 +9,6 @@
       <DotLottieVue
         ref="playerRef"
         class="app-boot-loader__animation"
-        animation-id="Main Scene"
         autoplay
         loop
         :src="splashAnimationUrl"
@@ -44,16 +43,18 @@ function notifyPlaybackReady() {
 
 function handlePlayerReady() {
   if (!dotLottieInstance) {
+    notifyPlaybackReady()
     return
   }
 
-  if (dotLottieInstance.activeAnimationId !== 'Main Scene') {
-    dotLottieInstance.loadAnimation('Main Scene')
+  try {
+    dotLottieInstance.setLoop(true)
+    dotLottieInstance.play()
+  } catch (error) {
+    console.warn('Boot animation failed to start:', error?.message || error)
+  } finally {
+    notifyPlaybackReady()
   }
-
-  dotLottieInstance.setLoop(true)
-  dotLottieInstance.play()
-  notifyPlaybackReady()
 }
 
 function attachPlayerListeners() {
@@ -63,12 +64,17 @@ function attachPlayerListeners() {
     attachAttempts += 1
     if (attachAttempts <= 20) {
       attachTimer = window.setTimeout(attachPlayerListeners, 50)
+      return
     }
+
+    notifyPlaybackReady()
     return
   }
 
   dotLottieInstance.addEventListener('ready', handlePlayerReady)
   dotLottieInstance.addEventListener('load', handlePlayerReady)
+  dotLottieInstance.addEventListener('loadError', notifyPlaybackReady)
+  dotLottieInstance.addEventListener('error', notifyPlaybackReady)
   dotLottieInstance.addEventListener('play', notifyPlaybackReady)
 
   if (dotLottieInstance.isLoaded) {
@@ -94,6 +100,8 @@ onBeforeUnmount(() => {
 
   dotLottieInstance.removeEventListener('ready', handlePlayerReady)
   dotLottieInstance.removeEventListener('load', handlePlayerReady)
+  dotLottieInstance.removeEventListener('loadError', notifyPlaybackReady)
+  dotLottieInstance.removeEventListener('error', notifyPlaybackReady)
   dotLottieInstance.removeEventListener('play', notifyPlaybackReady)
 })
 </script>

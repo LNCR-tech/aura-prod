@@ -536,6 +536,13 @@ const sheetSubtitle = computed(() => (
 const sheetSearchPlaceholder = computed(() => `Search ${candidateScopeLabel.value.toLowerCase()}`)
 
 const permissionsTitle = computed(() => `${managedUnitType.value || 'Governance'} Permissions`)
+const routeUnitId = computed(() => normalizePositiveId(readFirstQueryValue(route.query, [
+  'unit_id',
+  'unitId',
+  'governance_unit_id',
+  'governanceUnitId',
+  'id',
+])))
 
 watch(
   [() => sgLoading.value, () => sgError.value],
@@ -550,7 +557,7 @@ watch(
 )
 
 watch(
-  [apiBaseUrl, () => sgLoading.value, () => route.query?.variant, () => route.query?.unit_id],
+  [apiBaseUrl, () => sgLoading.value, () => route.query?.variant, routeUnitId],
   async ([url]) => {
     if (!url || sgLoading.value) return
     await loadUnit(url)
@@ -588,18 +595,50 @@ function resolveHierarchyTone(stepType, activeType) {
   return 'muted'
 }
 
-function applyManagedUnit(detail = null) {
-  managedUnit.value = detail && typeof detail === 'object' ? { ...detail } : null
-  governanceUnitId.value = Number(detail?.id || null)
+function readFirstQueryValue(query = {}, keys = []) {
+  for (const key of keys) {
+    const value = query?.[key]
+    if (Array.isArray(value)) {
+      const firstValue = value.find((entry) => String(entry ?? '').trim())
+      if (firstValue != null) return firstValue
+      continue
+    }
+
+    if (String(value ?? '').trim()) return value
+  }
+
+  return null
+}
+
+function normalizePositiveId(value) {
+  const numericValue = Number(value)
+  return Number.isFinite(numericValue) && numericValue > 0 ? numericValue : null
+}
+
+function applyManagedUnit(detail = null, fallbackUnitId = null) {
+  const unit = detail && typeof detail === 'object' ? { ...detail } : null
+  const normalizedUnitId = normalizePositiveId(
+    unit?.id
+    ?? unit?.governance_unit_id
+    ?? unit?.unit_id
+    ?? fallbackUnitId
+  )
+
+  managedUnit.value = unit ? { ...unit, id: normalizedUnitId ?? unit.id } : null
+  governanceUnitId.value = normalizedUnitId
   members.value = Array.isArray(detail?.members)
     ? detail.members.map(mapGovernanceMemberToCouncilMember)
     : []
+
+  if (!unit || !normalizedUnitId) {
+    loadError.value = 'The selected governance unit was not found or returned an invalid payload.'
+  }
 }
 
 async function loadUnit(url) {
   if (props.preview) {
     const previewUnit = previewBundle.value?.activeUnit || null
-    governanceUnitId.value = Number(previewUnit?.id || null)
+    governanceUnitId.value = normalizePositiveId(previewUnit?.id ?? previewUnit?.governance_unit_id)
     managedUnit.value = previewUnit ? {
       ...previewUnit,
       members: Array.isArray(previewBundle.value?.members) ? previewBundle.value.members : [],
@@ -616,11 +655,14 @@ async function loadUnit(url) {
   const token = localStorage.getItem('aura_token') || ''
 
   try {
-    const routeUnitId = Number(route.query?.unit_id) || null
+    if (!token) {
+      loadError.value = 'Please sign in again to manage governance members.'
+      return
+    }
 
-    if (routeUnitId) {
-      const detail = await getGovernanceUnitDetail(url, token, routeUnitId)
-      applyManagedUnit(detail)
+    if (routeUnitId.value) {
+      const detail = await getGovernanceUnitDetail(url, token, routeUnitId.value)
+      applyManagedUnit(detail, routeUnitId.value)
       return
     }
 
@@ -653,9 +695,16 @@ async function loadUnit(url) {
     }
 
     const targetUnit = childUnits[0]
-    const detail = await getGovernanceUnitDetail(url, token, targetUnit.id)
-    applyManagedUnit(detail)
+    const targetUnitId = normalizePositiveId(targetUnit?.id ?? targetUnit?.governance_unit_id)
+    if (!targetUnitId) {
+      loadError.value = `The first ${childUnitType} unit returned by the backend did not include a valid id.`
+      return
+    }
+
+    const detail = await getGovernanceUnitDetail(url, token, targetUnitId)
+    applyManagedUnit(detail, targetUnitId)
   } catch (error) {
+    console.error('Unable to load governance members:', error?.message || error)
     loadError.value = error?.message || 'Unable to load members.'
   } finally {
     isLoading.value = false
